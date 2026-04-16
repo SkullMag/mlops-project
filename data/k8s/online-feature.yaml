@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: online-feature
-  namespace: proj12
+  namespace: data
 spec:
   replicas: 1
   selector:
@@ -15,21 +15,21 @@ spec:
     spec:
       containers:
       - name: online-feature
-        image: online-feature:latest
+        image: ghcr.io/skullmag/mlops-project-online-feature:latest
         ports:
         - containerPort: 8000
         env:
         - name: APP_CRED_SECRET
           valueFrom:
             secretKeyRef:
-              name: chameleon-creds
+              name: swift-credentials
               key: app_cred_secret
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: online-feature-svc
-  namespace: proj12
+  namespace: data
 spec:
   selector:
     app: online-feature
