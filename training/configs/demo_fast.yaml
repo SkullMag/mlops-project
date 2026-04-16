@@ -1,0 +1,33 @@
+model:
+  type: "resnet50"
+  pretrained: true
+  num_classes: 80
+
+data:
+  train_img_dir: "data/val2017"
+  train_ann_file: "data/annotations/instances_val2017.json"
+  val_img_dir: "data/val2017"
+  val_ann_file: "data/annotations/instances_val2017.json"
+  image_size: 224
+  num_workers: 4
+
+training:
+  epochs: 2
+  batch_size: 64
+  learning_rate: 0.001
+  optimizer: "adam"
+  weight_decay: 0.0001
+  scheduler: "cosine"
+  step_size: 5
+  step_gamma: 0.1
+
+evaluation:
+  top_k: 3
+  threshold: 0.5
+
+mlflow:
+  tracking_uri: "http://mlflow:5000"
+  experiment_name: "immich-auto-tagging"
+  run_name: "demo_resnet50"
+
+seed: 42

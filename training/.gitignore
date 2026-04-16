@@ -1,0 +1,9 @@
+CHI-251409-openrc.sh
+.venv/
+__pycache__/
+data/
+mlruns/
+mlflow-data/
+outputs/
+results/
+*.pyc
