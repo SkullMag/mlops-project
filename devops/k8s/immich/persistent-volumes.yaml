@@ -1,0 +1,44 @@
+# Persistent Volume Claims for Immich
+# All PVCs use the default StorageClass (local-path in Kubespray).
+# Data persists across pod restarts — satisfies the durability requirement.
+
+# Upload storage — photos and videos uploaded by users
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: immich-upload-pvc
+  namespace: immich
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+
+---
+# PostgreSQL data directory
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: immich-postgres-pvc
+  namespace: immich
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# Redis data (optional — keeps job queue state across restarts)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: immich-redis-pvc
+  namespace: immich
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

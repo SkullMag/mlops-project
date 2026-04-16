@@ -1,0 +1,62 @@
+---
+# post_k8s_configure.yml
+# Run AFTER Kubespray finishes.
+# - Configures kubectl for the cc user on node1
+# - Stabilises cluster networking for Chameleon
+# - Prints dashboard token and ArgoCD password
+
+- name: Post-Kubernetes configuration
+  hosts: node1
+  become: false
+  gather_facts: true
+
+  tasks:
+    - name: Create .kube directory for cc user
+      file:
+        path: /home/cc/.kube
+        state: directory
+        mode: "0755"
+
+    - name: Copy admin kubeconfig for cc user
+      become: true
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/cc/.kube/config
+        owner: cc
+        group: cc
+        mode: "0600"
+        remote_src: yes
+
+    - name: Add cc user to docker group
+      become: true
+      user:
+        name: cc
+        groups: docker
+        append: yes
+
+    - name: Patch CoreDNS for Chameleon network stability
+      command: >
+        kubectl patch configmap coredns -n kube-system --type merge
+        -p '{"data":{"Corefile":".:53 {\n    errors\n    health\n    ready\n    kubernetes cluster.local in-addr.arpa ip6.arpa {\n      pods insecure\n      fallthrough in-addr.arpa ip6.arpa\n    }\n    forward . 8.8.8.8 8.8.4.4\n    cache 30\n    loop\n    reload\n    loadbalance\n}\n"}}'
+      ignore_errors: yes
+
+    - name: Get Kubernetes dashboard token
+      command: kubectl -n kube-system create token admin-user
+      register: dashboard_token
+      ignore_errors: yes
+
+    - name: Get ArgoCD admin password
+      command: >
+        kubectl -n argocd get secret argocd-initial-admin-secret
+        -o jsonpath="{.data.password}"
+      register: argocd_pw_b64
+      ignore_errors: yes
+
+    - name: Print access info
+      debug:
+        msg:
+          - "============================================"
+          - "Post-K8s configuration complete"
+          - "Dashboard token: {{ dashboard_token.stdout | default('not available') }}"
+          - "ArgoCD password (base64): {{ argocd_pw_b64.stdout | default('not available') }}"
+          - "============================================"

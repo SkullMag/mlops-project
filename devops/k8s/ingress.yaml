@@ -1,0 +1,56 @@
+# Ingress rules — routes external HTTP traffic to services
+# Requires nginx ingress controller (enabled via Kubespray k8s-cluster.yml)
+
+# ── Immich ────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: immich-ingress
+  namespace: immich
+  annotations:
+    # Allow large photo/video uploads (no body size limit)
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: immich-server
+                port:
+                  number: 2283
+
+---
+# ── Platform services (MLflow + MinIO) ───────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: platform-ingress
+  namespace: immich-platform
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /mlflow(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: mlflow
+                port:
+                  number: 8000
+          - path: /minio(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: minio
+                port:
+                  number: 9001

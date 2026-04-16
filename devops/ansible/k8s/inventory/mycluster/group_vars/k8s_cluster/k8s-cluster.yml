@@ -1,0 +1,29 @@
+---
+# Kubespray k8s-cluster.yml — cluster-level settings
+
+# Kubernetes version
+kube_version: v1.29.3
+
+# Network plugin — Calico is the Kubespray default and works well on Chameleon
+kube_network_plugin: calico
+
+# Cluster identity
+cluster_name: immich-cluster
+dns_domain: cluster.local
+
+# Container runtime
+container_manager: docker
+
+# Proxy mode
+kube_proxy_mode: ipvs
+
+# Enable nginx ingress controller so we have a proper Ingress resource
+ingress_nginx_enabled: true
+ingress_nginx_host_network: true
+
+# Enable Kubernetes dashboard
+dashboard_enabled: true
+
+# Enable local image registry (used for training/serving containers)
+registry_enabled: true
+registry_namespace: kube-system

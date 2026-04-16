@@ -1,0 +1,63 @@
+# Immich Machine Learning Service
+# Serves Immich's built-in CLIP (smart search) and facial recognition models.
+# This is separate from the ResNet-50 tagger added by the training team.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich-machine-learning
+  namespace: immich
+  labels:
+    app: immich-machine-learning
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: immich-machine-learning
+  template:
+    metadata:
+      labels:
+        app: immich-machine-learning
+    spec:
+      containers:
+        - name: immich-machine-learning
+          image: ghcr.io/immich-app/immich-machine-learning:release
+          ports:
+            - containerPort: 3003
+          env:
+            - name: MACHINE_LEARNING_CACHE_FOLDER
+              value: /cache
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /cache
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 3003
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+      volumes:
+        # Model weights downloaded on first run — emptyDir is fine here
+        # because the models are re-downloaded if the pod restarts
+        - name: model-cache
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: immich-machine-learning
+  namespace: immich
+spec:
+  selector:
+    app: immich-machine-learning
+  ports:
+    - port: 3003
+      targetPort: 3003

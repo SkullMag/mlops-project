@@ -1,0 +1,105 @@
+---
+# deploy_platform.yml
+# Deploys shared platform services into the immich-platform namespace:
+#   - MinIO  (S3-compatible object store for MLflow artifacts)
+#   - MLflow (model registry + experiment tracker)
+#   - PostgreSQL for MLflow metadata
+#
+# Secrets are generated at deploy time — never stored in Git.
+
+- name: Deploy platform services (MinIO + MLflow)
+  hosts: node1
+  become: false
+  gather_facts: true
+
+  tasks:
+    # ── Detect external IP ──────────────────────────────────────────────────
+    - name: Detect external IP (10.56.x.x range on KVM@TACC)
+      set_fact:
+        external_ip: "{{ ansible_all_ipv4_addresses | select('match', '^10\\.56\\..*') | first }}"
+
+    - name: Show detected external IP
+      debug:
+        msg: "External IP: {{ external_ip }}"
+
+    # ── Create namespace ────────────────────────────────────────────────────
+    - name: Create immich-platform namespace
+      command: kubectl apply -f /work/immich-iac/k8s/platform/namespace.yaml
+
+    # ── Generate MinIO secret ───────────────────────────────────────────────
+    - name: Check if minio-credentials secret already exists
+      command: kubectl get secret minio-credentials -n immich-platform
+      register: minio_secret_check
+      ignore_errors: true
+
+    - name: Generate MinIO secret key
+      when: minio_secret_check.rc != 0
+      set_fact:
+        minio_secret_key: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+
+    - name: Create MinIO credentials secret
+      when: minio_secret_check.rc != 0
+      command: >
+        kubectl create secret generic minio-credentials
+        --namespace immich-platform
+        --from-literal=accesskey=immich-minio-admin
+        --from-literal=secretkey={{ minio_secret_key }}
+
+    # ── Generate MLflow PostgreSQL secret ───────────────────────────────────
+    - name: Check if mlflow-postgres-credentials secret already exists
+      command: kubectl get secret mlflow-postgres-credentials -n immich-platform
+      register: mlflow_pg_check
+      ignore_errors: true
+
+    - name: Generate MLflow PostgreSQL password
+      when: mlflow_pg_check.rc != 0
+      set_fact:
+        mlflow_pg_password: "{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
+
+    - name: Create MLflow PostgreSQL credentials secret
+      when: mlflow_pg_check.rc != 0
+      command: >
+        kubectl create secret generic mlflow-postgres-credentials
+        --namespace immich-platform
+        --from-literal=password={{ mlflow_pg_password }}
+
+    # ── Deploy manifests ────────────────────────────────────────────────────
+    - name: Deploy MinIO
+      command: kubectl apply -f /work/immich-iac/k8s/platform/minio.yaml
+
+    - name: Deploy MLflow (PostgreSQL + MLflow server)
+      command: kubectl apply -f /work/immich-iac/k8s/platform/mlflow.yaml
+
+    # ── Patch external IPs so services are reachable from outside ───────────
+    - name: Patch MinIO service with external IP
+      command: >
+        kubectl patch svc minio -n immich-platform --type='json'
+        -p='[{"op":"add","path":"/spec/externalIPs","value":["{{ external_ip }}"]}]'
+
+    - name: Patch MLflow service with external IP
+      command: >
+        kubectl patch svc mlflow -n immich-platform --type='json'
+        -p='[{"op":"add","path":"/spec/externalIPs","value":["{{ external_ip }}"]}]'
+
+    # ── Create MinIO bucket for MLflow artifacts ────────────────────────────
+    - name: Wait for MinIO to be ready
+      command: kubectl rollout status deployment/minio -n immich-platform --timeout=120s
+
+    - name: Create mlflow-artifacts bucket in MinIO
+      command: >
+        kubectl run minio-setup --rm -i --restart=Never
+        --image=minio/mc:latest
+        --namespace immich-platform
+        -- sh -c "mc alias set minio http://minio.immich-platform.svc.cluster.local:9000 immich-minio-admin {{ minio_secret_key | default('') }} && mc mb --ignore-existing minio/mlflow-artifacts"
+      ignore_errors: true
+
+    # ── Print URLs ──────────────────────────────────────────────────────────
+    - name: Print platform service URLs
+      debug:
+        msg:
+          - "================================================"
+          - "Platform services deployed!"
+          - "MLflow:        http://{{ external_ip }}:8000"
+          - "MinIO console: http://{{ external_ip }}:9001"
+          - "MinIO API:     http://{{ external_ip }}:9000"
+          - "================================================"

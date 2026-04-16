@@ -1,0 +1,92 @@
+---
+# deploy_immich.yml
+# Deploys Immich and all its dependencies into the immich namespace:
+#   - PostgreSQL with pgvecto-rs extension (required by Immich for vector search)
+#   - Redis (job queue and session cache)
+#   - Immich server (REST API + web UI)
+#   - Immich microservices (background processing)
+#   - Immich machine-learning (CLIP embeddings + face recognition)
+#
+# Secrets are generated at deploy time — never stored in Git.
+
+- name: Deploy Immich
+  hosts: node1
+  become: false
+  gather_facts: true
+
+  tasks:
+    # ── Detect external IP ──────────────────────────────────────────────────
+    - name: Detect external IP (10.56.x.x range on KVM@TACC)
+      set_fact:
+        external_ip: "{{ ansible_all_ipv4_addresses | select('match', '^10\\.56\\..*') | first }}"
+
+    - name: Show detected external IP
+      debug:
+        msg: "External IP: {{ external_ip }}"
+
+    # ── Create namespace ────────────────────────────────────────────────────
+    - name: Create immich namespace
+      command: kubectl apply -f /work/immich-iac/k8s/immich/namespace.yaml
+
+    # ── Generate Immich secrets ─────────────────────────────────────────────
+    - name: Check if immich-secrets already exists
+      command: kubectl get secret immich-secrets -n immich
+      register: immich_secret_check
+      ignore_errors: true
+
+    - name: Generate Immich DB password and JWT secret
+      when: immich_secret_check.rc != 0
+      set_fact:
+        immich_db_password: "{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
+        immich_jwt_secret:  "{{ lookup('password', '/dev/null length=48 chars=ascii_letters,digits') }}"
+
+    - name: Create Immich secrets
+      when: immich_secret_check.rc != 0
+      command: >
+        kubectl create secret generic immich-secrets
+        --namespace immich
+        --from-literal=db-password={{ immich_db_password }}
+        --from-literal=jwt-secret={{ immich_jwt_secret }}
+
+    # ── Deploy PVCs first ───────────────────────────────────────────────────
+    - name: Deploy Immich persistent volume claims
+      command: kubectl apply -f /work/immich-iac/k8s/immich/persistent-volumes.yaml
+
+    # ── Deploy dependencies ─────────────────────────────────────────────────
+    - name: Deploy Immich PostgreSQL (pgvecto-rs)
+      command: kubectl apply -f /work/immich-iac/k8s/immich/postgres.yaml
+
+    - name: Deploy Immich Redis
+      command: kubectl apply -f /work/immich-iac/k8s/immich/redis.yaml
+
+    - name: Wait for PostgreSQL to be ready
+      command: kubectl rollout status deployment/immich-postgres -n immich --timeout=120s
+
+    - name: Wait for Redis to be ready
+      command: kubectl rollout status deployment/immich-redis -n immich --timeout=60s
+
+    # ── Deploy Immich services ──────────────────────────────────────────────
+    - name: Deploy Immich server
+      command: kubectl apply -f /work/immich-iac/k8s/immich/immich-server.yaml
+
+    - name: Deploy Immich microservices
+      command: kubectl apply -f /work/immich-iac/k8s/immich/immich-microservices.yaml
+
+    - name: Deploy Immich machine-learning service
+      command: kubectl apply -f /work/immich-iac/k8s/immich/immich-machine-learning.yaml
+
+    # ── Patch external IP ───────────────────────────────────────────────────
+    - name: Patch Immich server service with external IP
+      command: >
+        kubectl patch svc immich-server -n immich --type='json'
+        -p='[{"op":"add","path":"/spec/externalIPs","value":["{{ external_ip }}"]}]'
+
+    # ── Print URL ───────────────────────────────────────────────────────────
+    - name: Print Immich URL
+      debug:
+        msg:
+          - "================================================"
+          - "Immich deployed!"
+          - "Immich UI: http://{{ external_ip }}:2283"
+          - "First visit: create an admin account"
+          - "================================================"

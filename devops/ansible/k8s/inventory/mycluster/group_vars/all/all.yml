@@ -1,0 +1,7 @@
+---
+# Kubespray all.yml — global settings for all nodes
+bootstrap_os: ubuntu
+
+# Use the local Docker registry for control plane images
+# (improves reliability on Chameleon where external pulls can be slow)
+kube_image_repo: "registry.k8s.io"

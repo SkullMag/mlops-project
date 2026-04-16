@@ -1,0 +1,59 @@
+---
+# pre_k8s_configure.yml
+# Run BEFORE installing Kubernetes.
+# - Disables firewall (cloud security groups handle external access)
+# - Installs Docker
+# - Disables swap (required by Kubernetes)
+# - Configures Docker with the local registry
+
+- name: Pre-Kubernetes node configuration
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Disable UFW firewall
+      ufw:
+        state: disabled
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker.io
+          - docker-compose
+        state: present
+        update_cache: yes
+
+    - name: Configure Docker daemon (allow local registry, set log limits)
+      copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "insecure-registries": ["registry.kube-system.svc.cluster.local:5000"],
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "100m",
+              "max-file": "3"
+            }
+          }
+
+    - name: Restart Docker to apply config
+      systemd:
+        name: docker
+        state: restarted
+        enabled: true
+
+    - name: Add cc user to docker group
+      user:
+        name: cc
+        groups: docker
+        append: yes
+
+    - name: Disable swap (required for Kubernetes)
+      command: swapoff -a
+
+    - name: Remove swap from fstab so it stays off after reboot
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\sswap\s+.*)$'
+        replace: '# \1'

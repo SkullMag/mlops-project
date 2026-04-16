@@ -1,0 +1,10 @@
+[defaults]
+stdout_callback = yaml
+inventory = /work/immich-iac/ansible/inventory.yml
+
+[ssh_connection]
+ssh_args = -o ControlMaster=auto -o ControlPersist=60s \
+           -o StrictHostKeyChecking=off -o UserKnownHostsFile=/dev/null \
+           -o ForwardAgent=yes \
+           -o ProxyCommand="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p cc@A.B.C.D"
+pipelining = True

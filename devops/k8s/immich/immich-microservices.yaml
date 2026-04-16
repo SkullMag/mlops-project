@@ -1,0 +1,73 @@
+# Immich Microservices — background processing worker
+# Handles: thumbnail generation, video transcoding, metadata extraction,
+#           face detection, CLIP embedding generation
+# Uses the same container image as immich-server but runs in microservices mode.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich-microservices
+  namespace: immich
+  labels:
+    app: immich-microservices
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: immich-microservices
+  template:
+    metadata:
+      labels:
+        app: immich-microservices
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.35
+          command:
+            - sh
+            - -c
+            - until nc -z immich-postgres 5432; do echo "waiting for postgres..."; sleep 3; done
+      containers:
+        - name: immich-microservices
+          image: ghcr.io/immich-app/immich-server:release
+          command: ["/bin/sh", "-c", "node /usr/src/app/dist/main microservices"]
+          env:
+            - name: DB_HOSTNAME
+              value: immich-postgres
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_DATABASE_NAME
+              value: immich
+            - name: DB_USERNAME
+              value: immich
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: immich-secrets
+                  key: db-password
+            - name: REDIS_HOSTNAME
+              value: immich-redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: immich-secrets
+                  key: jwt-secret
+            - name: UPLOAD_LOCATION
+              value: /usr/src/app/upload
+            - name: IMMICH_MACHINE_LEARNING_URL
+              value: http://immich-machine-learning:3003
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          volumeMounts:
+            - name: upload-data
+              mountPath: /usr/src/app/upload
+      volumes:
+        - name: upload-data
+          persistentVolumeClaim:
+            claimName: immich-upload-pvc
