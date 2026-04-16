@@ -1,0 +1,13 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install Ray Serve and dependencies
+RUN pip install --no-cache-dir fastapi uvicorn pydantic "ray[serve]"
+
+COPY serve_app.py .
+
+EXPOSE 8000
+
+# Start Ray Serve
+CMD ["python3", "serve_app.py"]

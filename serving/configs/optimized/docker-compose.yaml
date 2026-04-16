@@ -1,0 +1,34 @@
+# Use a slim Python image to reduce overhead
+FROM python:3.10-slim
+
+# Set environment variables for better Python performance
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install system dependencies required for building Ray and high-perf networking
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Ray with Serve support, FastAPI, and Uvicorn
+# We use "ray[serve]" to ensure all dashboard and cluster dependencies are included
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn \
+    pydantic \
+    requests \
+    "ray[serve]"
+
+# Copy your optimized 48-core script into the container
+COPY serve_app_max.py .
+
+# Expose port 8000 for the FastAPI/Ray Serve gateway
+EXPOSE 8000
+
+# Run the script. 
+# We use 'python3' directly because the script handles its own 'ray.init()' 
+# and 'serve.start()' calls.
+CMD ["python3", "serve_app_max.py"]
