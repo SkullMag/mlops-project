@@ -1,0 +1,7 @@
+version: '3.8'
+
+services:
+  data-ingestion:
+    build: .
+    environment:
+      - APP_CRED_SECRET=${APP_CRED_SECRET}

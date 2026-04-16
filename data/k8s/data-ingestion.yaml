@@ -1,0 +1,19 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-ingestion
+  namespace: proj12
+spec:
+  template:
+    spec:
+      containers:
+      - name: data-ingestion
+        image: data-ingestion:latest
+        env:
+        - name: APP_CRED_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: chameleon-creds
+              key: app_cred_secret
+      restartPolicy: Never
+  backoffLimit: 3

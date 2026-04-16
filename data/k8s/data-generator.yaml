@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-generator
+  namespace: proj12
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: data-generator
+  template:
+    metadata:
+      labels:
+        app: data-generator
+    spec:
+      containers:
+      - name: data-generator
+        image: data-generator:latest
+        env:
+        - name: APP_CRED_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: chameleon-creds
+              key: app_cred_secret

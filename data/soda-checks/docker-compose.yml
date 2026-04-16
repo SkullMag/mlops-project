@@ -1,0 +1,7 @@
+version: '3.8'
+
+services:
+  soda-checks:
+    build: .
+    environment:
+      - APP_CRED_SECRET=${APP_CRED_SECRET}

@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: online-feature
+  namespace: proj12
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: online-feature
+  template:
+    metadata:
+      labels:
+        app: online-feature
+    spec:
+      containers:
+      - name: online-feature
+        image: online-feature:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: APP_CRED_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: chameleon-creds
+              key: app_cred_secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: online-feature-svc
+  namespace: proj12
+spec:
+  selector:
+    app: online-feature
+  ports:
+  - port: 8000
+    targetPort: 8000
