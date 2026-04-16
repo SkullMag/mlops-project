@@ -9,6 +9,25 @@ APPLICATION_CREDENTIAL_ID = "31e8934d3ef44f69806e43ff4293be65"
 APPLICATION_CREDENTIAL_SECRET = os.environ["APP_CRED_SECRET"]
 CONTAINER_NAME = "proj12-data"
 
+def drop_ready_marker(conn, version, manifest):
+    import json
+    marker = {
+        "version": version,
+        "dataset_path": f"datasets/v{version}/",
+        "train_size": manifest["train_size"],
+        "val_size": manifest["val_size"],
+        "test_size": manifest["test_size"],
+        "status": "READY",
+        "created_at": manifest["created_at"]
+    }
+    conn.put_object(
+        CONTAINER_NAME,
+        f"datasets/v{version}/READY",
+        json.dumps(marker).encode()
+    )
+    print(f"READY marker dropped for version {version}")
+
+
 TEST_USERS = {"user_001", "user_002", "user_003", "user_004", "user_005"}
 
 def get_swift_conn():
@@ -172,6 +191,7 @@ def main():
         f"datasets/v{version}/manifest.json",
         json.dumps(manifest).encode()
     )
+    drop_ready_marker(conn, version, manifest)
     print(f"Pipeline complete! Dataset version: {version}")
     print(json.dumps(manifest, indent=2))
 
