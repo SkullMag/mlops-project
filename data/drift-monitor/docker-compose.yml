@@ -1,0 +1,7 @@
+version: "3.8"
+services:
+  drift-monitor:
+    build: .
+    environment:
+      - APP_CRED_SECRET=${APP_CRED_SECRET}
+    restart: "no"

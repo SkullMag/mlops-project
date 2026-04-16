@@ -10,6 +10,29 @@ APPLICATION_CREDENTIAL_ID = "31e8934d3ef44f69806e43ff4293be65"
 APPLICATION_CREDENTIAL_SECRET = os.environ["APP_CRED_SECRET"]
 CONTAINER_NAME = "proj12-data"
 
+def validate_image(fpath):
+    import os
+    from PIL import Image
+    file_size = os.path.getsize(fpath)
+    if file_size < 1024:
+        return False, f"File too small ({file_size} bytes)"
+    if not fpath.lower().endswith((".jpg", ".jpeg", ".png")):
+        return False, "Invalid file format"
+    try:
+        img = Image.open(fpath)
+        img.verify()
+    except Exception as e:
+        return False, f"Corrupted image: {e}"
+    try:
+        img = Image.open(fpath).convert("RGB")
+        w, h = img.size
+        if w < 32 or h < 32:
+            return False, f"Image too small ({w}x{h})"
+    except Exception as e:
+        return False, f"Cannot read image: {e}"
+    return True, "ok"
+
+
 COCO_ANNOTATIONS_URL = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
 COCO_TRAIN_URL = "http://images.cocodataset.org/zips/train2017.zip"
 
@@ -72,6 +95,10 @@ def process_and_upload_images(conn, image_dir, max_images=5000):
         if count >= max_images:
             break
         fpath = os.path.join(image_dir, fname)
+        is_valid, reason = validate_image(fpath)
+        if not is_valid:
+            print(f"Skipping {fname}: {reason}")
+            continue
         try:
             img = Image.open(fpath).convert("RGB")
             augmented_versions = augment_image(img)
