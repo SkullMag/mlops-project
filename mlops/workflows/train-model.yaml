@@ -1,0 +1,266 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: train-model
+spec:
+  entrypoint: training-and-build
+  arguments:
+    parameters:
+    - name: branch
+      value: mlops
+
+  # Compatibility: some clusters ignore seccompProfile/appArmorProfile fields
+  podMetadata:
+    annotations:
+      seccomp.security.alpha.kubernetes.io/pod: unconfined
+      container.apparmor.security.beta.kubernetes.io/main: unconfined
+
+  volumeClaimTemplates:
+  - metadata:
+      name: workdir
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+
+  volumes:
+  - name: buildkitd
+    emptyDir: {}
+
+  templates:
+  - name: training-and-build
+    steps:
+      # Step 1: Clone repo and check if code has changed
+      - - name: check-code-changes
+          template: check-and-clone
+          arguments:
+            parameters:
+            - name: branch
+              value: "{{workflow.parameters.branch}}"
+      # Step 2: Conditionally rebuild training image if code changed
+      - - name: rebuild-training-image
+          template: buildkit-rootless
+          arguments:
+            parameters:
+            - name: git-commit
+              value: "{{steps.check-code-changes.outputs.parameters.git-commit}}"
+          when: "'{{steps.check-code-changes.outputs.parameters.needs-rebuild}}' == 'true'"
+      # Step 3: Run training
+      - - name: run-training
+          template: run-training
+      # Step 4: Tag model as development in MLflow (latest trained)
+      - - name: tag-model-development
+          template: set-development-alias
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{steps.run-training.outputs.parameters.modelversion}}"
+          when: "'{{steps.run-training.outputs.parameters.modelversion}}' != ''"
+
+      # Step 5: Trigger app container build if model was registered
+      - - name: build-container
+          template: trigger-build
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{steps.run-training.outputs.parameters.modelversion}}"
+          when: "'{{steps.run-training.outputs.parameters.modelversion}}' != ''"
+
+  # Template: Clone repo and check if rebuild is needed by comparing git commit to image label
+  - name: check-and-clone
+    inputs:
+      parameters:
+      - name: branch
+    outputs:
+      parameters:
+      - name: needs-rebuild
+        valueFrom:
+          path: /var/run/argo/outputs/parameters/needs-rebuild
+      - name: git-commit
+        valueFrom:
+          path: /var/run/argo/outputs/parameters/git-commit
+    retryStrategy:
+      limit: "5"
+      retryPolicy: "Always"
+      backoff:
+        duration: "10s"
+        factor: "2"
+    container:
+      image: alpine:3.19
+      workingDir: /mnt/workspace
+      command: [sh, -c]
+      args:
+        - |
+          set -eu
+          
+          # Install git and curl
+          apk add --no-cache git curl jq > /dev/null 2>&1
+          
+          # Clone the repository
+          git clone --depth 1 --filter=blob:none --no-tags --single-branch \
+            --branch "{{inputs.parameters.branch}}" \
+            https://github.com/SkullMag/mlops-project.git .
+          
+          # Get current git commit
+          GIT_COMMIT=$(git rev-parse HEAD)
+          echo "Current git commit: $GIT_COMMIT"
+          
+          # Try to get the commit label from the existing image in registry
+          REGISTRY="registry.kube-system.svc.cluster.local:5000"
+          IMAGE_COMMIT=""
+          
+          # Query registry for image manifest and config to get labels
+          # First get the manifest to find the config digest
+          MANIFEST=$(curl -sf "http://${REGISTRY}/v2/immich-tagger-train/manifests/latest" \
+            -H "Accept: application/vnd.docker.distribution.manifest.v2+json" 2>/dev/null || echo "")
+          
+          if [ -n "$MANIFEST" ]; then
+            CONFIG_DIGEST=$(echo "$MANIFEST" | jq -r '.config.digest // empty' 2>/dev/null || echo "")
+            if [ -n "$CONFIG_DIGEST" ]; then
+              # Get the config blob which contains labels
+              CONFIG=$(curl -sf "http://${REGISTRY}/v2/immich-tagger-train/blobs/${CONFIG_DIGEST}" 2>/dev/null || echo "")
+              if [ -n "$CONFIG" ]; then
+                IMAGE_COMMIT=$(echo "$CONFIG" | jq -r '.config.Labels["git.commit"] // empty' 2>/dev/null || echo "")
+              fi
+            fi
+          fi
+          
+          echo "Image git commit label: ${IMAGE_COMMIT:-<not found>}"
+          
+          # Prepare output directory
+          mkdir -p /var/run/argo/outputs/parameters
+          echo "$GIT_COMMIT" > /var/run/argo/outputs/parameters/git-commit
+          
+          # Determine if rebuild is needed
+          # Always rebuild for non-default branches
+          BRANCH="{{inputs.parameters.branch}}"
+          if [ "$BRANCH" != "mlops" ]; then
+            echo "Rebuild needed: non-default branch '$BRANCH' specified"
+            echo "true" > /var/run/argo/outputs/parameters/needs-rebuild
+          elif [ -z "$IMAGE_COMMIT" ] || [ "$IMAGE_COMMIT" != "$GIT_COMMIT" ]; then
+            echo "Rebuild needed: code has changed or image not found"
+            echo "true" > /var/run/argo/outputs/parameters/needs-rebuild
+          else
+            echo "No rebuild needed: image is up to date"
+            echo "false" > /var/run/argo/outputs/parameters/needs-rebuild
+          fi
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workspace
+
+  # Template: Build training container image using buildkit
+  - name: buildkit-rootless
+    inputs:
+      parameters:
+      - name: git-commit
+    retryStrategy:
+      limit: "3"
+      retryPolicy: "Always"
+      backoff:
+        duration: "30s"
+        factor: "2"
+    container:
+      image: moby/buildkit:rootless
+      env:
+      - name: BUILDKITD_FLAGS
+        value: --oci-worker-no-process-sandbox
+      command: [buildctl-daemonless.sh]
+      args:
+        - build
+        - --frontend
+        - dockerfile.v0
+        - --local
+        - context=/mnt/workspace
+        - --local
+        - dockerfile=/mnt/workspace
+        - --opt
+        - label:git.commit={{inputs.parameters.git-commit}}
+        - --output
+        - type=image,name=registry.kube-system.svc.cluster.local:5000/immich-tagger-train:latest,push=true,registry.insecure=true
+        - --export-cache
+        - type=registry,ref=registry.kube-system.svc.cluster.local:5000/immich-tagger-train:buildcache,mode=max,registry.insecure=true
+        - --import-cache
+        - type=registry,ref=registry.kube-system.svc.cluster.local:5000/immich-tagger-train:buildcache,registry.insecure=true
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "500m"
+        limits:
+          memory: "3Gi"
+          cpu: "1"
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: Unconfined
+        appArmorProfile:
+          type: Unconfined
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workspace
+      - name: buildkitd
+        mountPath: /home/user/.local/share/buildkit
+
+  - name: run-training
+    outputs:
+      parameters:
+      - name: modelversion
+        valueFrom:
+          path: /var/run/argo/outputs/parameters/modelversion
+    container:
+      image: registry.kube-system.svc.cluster.local:5000/immich-tagger-train:latest
+      command: [sh, -c]
+      args:
+        - |
+          set -eu
+          python flow.py
+
+          # Argo (emissary executor) requires output parameters to be written
+          # under /var/run/argo/outputs/parameters/
+          mkdir -p /var/run/argo/outputs/parameters
+          if [ -f /tmp/model_version ]; then
+            cp /tmp/model_version /var/run/argo/outputs/parameters/modelversion
+          else
+            # Avoid hard failure if training didn't emit a version.
+            : > /var/run/argo/outputs/parameters/modelversion
+          fi
+      env:
+        - name: MLFLOW_TRACKING_URI
+          value: "http://mlflow.immich-platform.svc.cluster.local:8000"
+
+  - name: trigger-build
+    inputs:
+      parameters:
+      - name: model-version
+    resource:
+      action: create
+      manifest: |
+        apiVersion: argoproj.io/v1alpha1
+        kind: Workflow
+        metadata:
+          generateName: build-container-image-
+        spec:
+          workflowTemplateRef:
+            name: build-container-image
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{inputs.parameters.model-version}}"
+
+  - name: set-development-alias
+    inputs:
+      parameters:
+      - name: model-version
+    script:
+      image: python:3.11-slim
+      command: [sh, -c]
+      source: |
+        set -eu
+        export PIP_DISABLE_PIP_VERSION_CHECK=1
+        pip install mlflow-skinny==3.9.0 > /dev/null
+        export MLFLOW_TRACKING_URI=http://mlflow.immich-platform.svc.cluster.local:8000
+
+        python -c "import mlflow; client = mlflow.tracking.MlflowClient(); client.set_registered_model_alias(name='ImmichTaggerModel', alias='development', version='{{inputs.parameters.model-version}}')"
+
+        echo "Updated MLflow development alias to version {{inputs.parameters.model-version}}"

@@ -1,0 +1,335 @@
+---
+- name: Post-Install kubectl Setup
+  hosts: node1,node2
+  become: yes
+  vars:
+    ansible_user: cc
+  tasks:
+    - name: Ensure .kube directory exists
+      file:
+        path: "/home/{{ ansible_user }}/.kube"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Copy admin.conf to user's kubeconfig
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "/home/{{ ansible_user }}/.kube/config"
+        remote_src: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+
+    - name: Run kubectl get nodes as cc
+      command: kubectl get nodes
+      become_user: "{{ ansible_user }}"
+      register: kubectl_output
+
+    - name: Show kubectl get nodes output
+      debug:
+        msg: "{{ kubectl_output.stdout_lines }}"
+
+- name: Add User to Docker Group
+  hosts: node1,node2,node3
+  become: yes
+  tasks:
+
+    - name: Add user 'cc' to docker group
+      user:
+        name: cc
+        groups: docker
+        append: yes
+        
+    - meta: reset_connection
+
+    - name: Verify Docker group membership for user 'cc'
+      command: id cc
+      register: cc_id
+
+    - name: Show user groups
+      debug:
+        msg: "{{ cc_id.stdout }}"
+
+- name: Disable IPv6 on Internet-facing interface
+  hosts: all
+  become: true
+  tasks:
+
+    - name: Create sysctl config to disable IPv6
+      copy:
+        dest: /etc/sysctl.d/99-disable-ipv6.conf
+        content: |
+          net.ipv6.conf.ens3.disable_ipv6 = 1
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Apply sysctl settings immediately
+      command: sysctl --system
+
+- name: Avoid using private interface for DNS
+  hosts: node1,node2,node3
+  become: yes
+  tasks:
+    - name: Set DNS for interface ens4
+      command: resolvectl dns ens4 127.0.0.1
+
+- name: Patch CoreDNS to use external resolver and restart it
+  hosts: node1
+  become: yes
+  tasks:
+    - name: Patch CoreDNS ConfigMap to use 8.8.8.8
+      command: >
+        kubectl -n kube-system patch configmap coredns
+        --type merge
+        -p '{{ coredns_patch | to_json }}'
+      vars:
+        coredns_patch:
+          data:
+            Corefile: |
+              .:53 {
+                  errors
+                  health
+                  ready
+                  kubernetes cluster.local in-addr.arpa ip6.arpa {
+                    pods insecure
+                    fallthrough in-addr.arpa ip6.arpa
+                  }
+                  prometheus :9153
+                  forward . 8.8.8.8 1.1.1.1 {
+                    prefer_udp
+                    max_concurrent 1000
+                  }
+                  cache 30
+                  loop
+                  reload
+                  loadbalance
+              }
+
+    - name: Restart CoreDNS deployment
+      command: kubectl -n kube-system rollout restart deployment coredns
+
+    - name: Wait for CoreDNS to be ready
+      shell: kubectl -n kube-system rollout status deployment/coredns --timeout=120s
+
+- name: Patch nodelocaldns to block IPv6 AAAA responses
+  hosts: node1
+  become: yes
+  tasks:
+    - name: Get CoreDNS service ClusterIP
+      command: kubectl -n kube-system get svc coredns -o jsonpath='{.spec.clusterIP}'
+      register: coredns_ip
+      changed_when: false
+
+    - name: Patch nodelocaldns ConfigMap to add AAAA template
+      command: >
+        kubectl -n kube-system patch configmap nodelocaldns
+        --type merge
+        -p '{{ nodelocaldns_patch | to_json }}'
+      vars:
+        nodelocaldns_patch:
+          data:
+            Corefile: |
+              cluster.local:53 {
+                  errors
+                  cache {
+                      success 9984 30
+                      denial 9984 5
+                  }
+                  reload
+                  loop
+                  bind 169.254.25.10
+                  forward . {{ coredns_ip.stdout }} {
+                      force_tcp
+                  }
+                  prometheus :9253
+                  health 169.254.25.10:9254
+              }
+              in-addr.arpa:53 {
+                  errors
+                  cache 30
+                  reload
+                  loop
+                  bind 169.254.25.10
+                  forward . {{ coredns_ip.stdout }} {
+                      force_tcp
+                  }
+                  prometheus :9253
+              }
+              ip6.arpa:53 {
+                  errors
+                  cache 30
+                  reload
+                  loop
+                  bind 169.254.25.10
+                  forward . {{ coredns_ip.stdout }} {
+                      force_tcp
+                  }
+                  prometheus :9253
+              }
+              .:53 {
+                  errors
+                  template IN AAAA {
+                      rcode NOERROR
+                  }
+                  cache 30
+                  reload
+                  loop
+                  bind 169.254.25.10
+                  forward . /etc/resolv.conf
+                  prometheus :9253
+              }
+
+    - name: Restart nodelocaldns daemonset
+      command: kubectl -n kube-system rollout restart daemonset nodelocaldns
+
+    - name: Wait for nodelocaldns to be ready
+      shell: kubectl -n kube-system rollout status daemonset/nodelocaldns --timeout=120s
+
+- name: Setup Kubernetes Dashboard
+  hosts: node1
+  become: yes
+  tasks:
+    - name: Create dashboard admin-user and RBAC
+      become: yes
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: admin-user
+          namespace: kube-system
+        ---
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: admin-user
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: cluster-admin
+        subjects:
+        - kind: ServiceAccount
+          name: admin-user
+          namespace: kube-system
+        EOF
+      args:
+        executable: /bin/bash
+
+    - name: Wait for Kubernetes Dashboard pod to be running
+      shell: |
+        kubectl get pods -n kube-system -l k8s-app=kubernetes-dashboard -o jsonpath='{.items[0].status.phase}'
+      register: dashboard_status
+      retries: 10
+      delay: 10
+      until: dashboard_status.stdout == "Running"
+
+    - name: Create token for dashboard access
+      shell: |
+        kubectl -n kube-system create token admin-user
+      register: dashboard_token
+      changed_when: false
+
+    - name: Display dashboard token
+      debug:
+        msg: "Dashboard token: {{ dashboard_token.stdout }}"
+
+
+- name: Install ArgoCD CLI
+  hosts: node1
+  become: yes
+  tasks:
+    - name: Download ArgoCD CLI binary
+      get_url:
+        url: "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64"
+        dest: "/usr/local/bin/argocd"
+        mode: '0755'
+
+    - name: Verify ArgoCD CLI installation
+      command: argocd version --client
+      register: argocd_version
+      ignore_errors: yes
+
+    - name: Show ArgoCD version
+      debug:
+        msg: "{{ argocd_version.stdout_lines }}"
+
+- name: Get ArgoCD admin password
+  hosts: node1
+  become: yes
+  tasks:
+    - name: Fetch ArgoCD initial admin password
+      shell: |
+        kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 --decode
+      register: argocd_admin_password
+      changed_when: false
+
+    - name: Show ArgoCD admin password
+      debug:
+        msg: "ArgoCD admin password: {{ argocd_admin_password.stdout }}"
+
+- name: Install Argo Workflows
+  hosts: node1
+  become: yes
+  tasks:
+    - name: Create argo namespace
+      command: kubectl create namespace argo
+      register: argo_ns
+      failed_when: argo_ns.rc != 0 and 'AlreadyExists' not in argo_ns.stderr
+      changed_when: "'created' in argo_ns.stdout.lower()"
+
+    - name: Install Argo Workflows
+      shell: |
+        kubectl apply -n argo -f https://github.com/argoproj/argo-workflows/releases/download/v3.6.5/quick-start-minimal.yaml
+      args:
+        executable: /bin/bash
+
+- name: Install Argo Events
+  hosts: node1
+  become: yes
+  tasks:
+    - name: Create argo-events namespace
+      command: kubectl create namespace argo-events
+      register: argo_events_ns
+      failed_when: argo_events_ns.rc != 0 and 'AlreadyExists' not in argo_events_ns.stderr
+      changed_when: "'created' in argo_events_ns.stdout.lower()"
+
+    - name: Install Argo Events
+      shell: |
+        kubectl apply -n argo-events -f https://github.com/argoproj/argo-events/releases/download/v1.9.6/install.yaml
+      args:
+        executable: /bin/bash
+
+- name: Copy ArgoCD admin secret to Argo Workflows namespace
+  hosts: node1
+  become: yes
+  vars:
+    source_namespace: argocd
+    target_namespace: argo
+    secret_name: argocd-initial-admin-secret
+
+  tasks:
+    - name: Get ArgoCD admin secret YAML
+      command: >
+        kubectl get secret {{ secret_name }} -n {{ source_namespace }} -o yaml
+      register: secret_yaml
+
+    - name: Modify namespace in secret YAML
+      set_fact:
+        updated_secret_yaml: >-
+          {{ secret_yaml.stdout
+            | regex_replace('namespace: .*', 'namespace: ' ~ target_namespace)
+            | regex_replace('  resourceVersion: .*', '')
+            | regex_replace('  uid: .*', '')
+            | regex_replace('  creationTimestamp: .*', '') }}
+
+    - name: Apply secret to target namespace
+      shell: |
+        echo "{{ updated_secret_yaml }}" | kubectl apply -n {{ target_namespace }} -f -
+      register: apply_result
+
+    - name: Show apply result
+      debug:
+        var: apply_result.stdout

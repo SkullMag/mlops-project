@@ -1,0 +1,61 @@
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich-tagger
+  namespace: immich-staging
+
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: immich-tagger
+  template:
+    metadata:
+      labels:
+        app: immich-tagger
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: immich-tagger
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ENV_NAME
+              value: "staging"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.immich-platform.svc.cluster.local:8000"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: immich-tagger
+  namespace: immich-staging
+spec:
+  selector:
+    app: immich-tagger
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: 8000
+  externalIPs:
+    - {{ .Values.service.externalIP }}
+

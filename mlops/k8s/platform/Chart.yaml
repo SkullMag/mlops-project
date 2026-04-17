@@ -1,0 +1,4 @@
+apiVersion: v2
+name: immich-platform
+version: 1.0.0
+description: Immich MLOps Platform Services

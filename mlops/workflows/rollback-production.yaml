@@ -1,0 +1,110 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: rollback-production
+  annotations:
+    description: >
+      Rolls the production serving deployment back to the previous model version.
+      Triggered automatically by Argo Events when Prometheus reports a critical
+      failure in the production namespace (see rollback-sensor.yaml).
+spec:
+  entrypoint: rollback-flow
+
+  templates:
+  - name: rollback-flow
+    steps:
+      - - name: find-previous-version
+          template: query-mlflow-previous
+      - - name: retag-image
+          template: skopeo-retag
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{steps.find-previous-version.outputs.parameters.previous-version}}"
+      - - name: redeploy
+          template: trigger-deploy
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{steps.find-previous-version.outputs.parameters.previous-version}}"
+      - - name: reset-alias
+          template: set-mlflow-alias
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{steps.find-previous-version.outputs.parameters.previous-version}}"
+
+  # Query MLflow for the model version tagged with `production-previous`.
+  # This alias is set by the deploy-container-image workflow each time a
+  # new production model is promoted (before overwriting `production`).
+  - name: query-mlflow-previous
+    outputs:
+      parameters:
+      - name: previous-version
+        valueFrom:
+          path: /tmp/previous_version
+    script:
+      image: python:3.11-slim
+      command: [sh, -c]
+      source: |
+        pip install mlflow-skinny==3.9.0 > /dev/null
+        export MLFLOW_TRACKING_URI=http://mlflow.immich-platform.svc.cluster.local:8000
+        python - <<'PY'
+        import mlflow
+        client = mlflow.tracking.MlflowClient()
+        try:
+            mv = client.get_model_version_by_alias("ImmichTaggerModel", "production-previous")
+            with open("/tmp/previous_version", "w") as f:
+                f.write(mv.version)
+            print(f"Rolling back to version {mv.version}")
+        except Exception as e:
+            raise SystemExit(f"No production-previous alias found; cannot roll back: {e}")
+        PY
+
+  - name: skopeo-retag
+    inputs:
+      parameters:
+      - name: model-version
+    container:
+      image: quay.io/skopeo/stable
+      command: [sh, -c]
+      args:
+        - |
+          skopeo copy \
+            --src-tls-verify=false \
+            --dest-tls-verify=false \
+            docker://registry.kube-system.svc.cluster.local:5000/immich-tagger:production-1.0.{{inputs.parameters.model-version}} \
+            docker://registry.kube-system.svc.cluster.local:5000/immich-tagger:production-1.0.{{inputs.parameters.model-version}}-rollback
+
+  - name: set-mlflow-alias
+    inputs:
+      parameters:
+      - name: model-version
+    script:
+      image: python:3.11-slim
+      command: [sh, -c]
+      source: |
+        pip install mlflow-skinny==3.9.0 > /dev/null
+        export MLFLOW_TRACKING_URI=http://mlflow.immich-platform.svc.cluster.local:8000
+        python -c "import mlflow; c = mlflow.tracking.MlflowClient(); c.set_registered_model_alias('ImmichTaggerModel', 'production', '{{inputs.parameters.model-version}}')"
+
+  - name: trigger-deploy
+    inputs:
+      parameters:
+      - name: model-version
+    resource:
+      action: create
+      manifest: |
+        apiVersion: argoproj.io/v1alpha1
+        kind: Workflow
+        metadata:
+          generateName: deploy-container-image-rollback-
+        spec:
+          workflowTemplateRef:
+            name: deploy-container-image
+          arguments:
+            parameters:
+            - name: environment
+              value: "production"
+            - name: model-version
+              value: "{{inputs.parameters.model-version}}"

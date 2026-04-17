@@ -1,0 +1,100 @@
+---
+# EventBus: required infrastructure for Argo Events
+apiVersion: argoproj.io/v1alpha1
+kind: EventBus
+metadata:
+  name: default
+  namespace: argo-events
+spec:
+  jetstream:
+    version: latest
+---
+# EventSource: listens on an HTTP webhook.
+# Prometheus can be wired to POST to this endpoint via `webhook_configs`
+# in an Alertmanager instance; for this project we keep it simple and
+# let Prometheus's built-in alerting UI or a sidecar post to this endpoint.
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: rollback-webhook
+  namespace: argo-events
+spec:
+  service:
+    ports:
+      - port: 12000
+        targetPort: 12000
+  webhook:
+    rollback-alert:
+      port: "12000"
+      endpoint: /rollback
+      method: POST
+---
+# Sensor: when the webhook fires, submit a rollback-production workflow.
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: rollback-sensor
+  namespace: argo-events
+spec:
+  template:
+    serviceAccountName: operate-workflow-sa
+  dependencies:
+    - name: rollback-alert
+      eventSourceName: rollback-webhook
+      eventName: rollback-alert
+      # Only fire on alerts with `action=rollback` and `status=firing`,
+      # so Prometheus can send every alert here without false triggers.
+      filters:
+        data:
+          - path: body.alerts.0.status
+            type: string
+            value:
+              - firing
+          - path: body.alerts.0.labels.action
+            type: string
+            value:
+              - rollback
+  triggers:
+    - template:
+        name: trigger-rollback
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: rollback-production-
+                namespace: argo
+              spec:
+                workflowTemplateRef:
+                  name: rollback-production
+---
+# ServiceAccount + RBAC needed for the sensor to create Workflows in the argo namespace
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: operate-workflow-sa
+  namespace: argo-events
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: operate-workflow
+rules:
+- apiGroups: ["argoproj.io"]
+  resources: ["workflows", "workflowtemplates"]
+  verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: operate-workflow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: operate-workflow
+subjects:
+- kind: ServiceAccount
+  name: operate-workflow-sa
+  namespace: argo-events

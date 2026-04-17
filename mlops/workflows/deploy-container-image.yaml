@@ -1,0 +1,74 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: deploy-container-image
+spec:
+  entrypoint: deploy-flow
+  arguments:
+    parameters:
+    - name: environment
+    - name: model-version
+
+  templates:
+  - name: deploy-flow
+    steps:
+      # If deploying to production, snapshot the current production model
+      # version under the `production-previous` alias so rollback has a target.
+      - - name: snapshot-previous
+          template: snapshot-previous-production
+          when: "'{{workflow.parameters.environment}}' == 'production'"
+      - - name: deploy
+          template: argocd-deploy
+          arguments:
+            parameters:
+            - name: environment
+              value: "{{workflow.parameters.environment}}"
+            - name: model-version
+              value: "{{workflow.parameters.model-version}}"
+
+  - name: snapshot-previous-production
+    script:
+      image: python:3.11-slim
+      command: [sh, -c]
+      source: |
+        pip install mlflow-skinny==3.9.0 > /dev/null
+        export MLFLOW_TRACKING_URI=http://mlflow.immich-platform.svc.cluster.local:8000
+        python - <<'PY'
+        import mlflow
+        c = mlflow.tracking.MlflowClient()
+        try:
+            current = c.get_model_version_by_alias("ImmichTaggerModel", "production")
+            c.set_registered_model_alias("ImmichTaggerModel", "production-previous", current.version)
+            print(f"Saved production-previous = v{current.version}")
+        except Exception as e:
+            print(f"No existing production alias (first deploy): {e}")
+        PY
+
+  - name: argocd-deploy
+    inputs:
+      parameters:
+      - name: environment
+      - name: model-version
+    container:
+      image: argoproj/argocd:latest
+      command: [sh, -c]
+      args:
+        - |
+          set -eu
+          echo "Deploying model {{inputs.parameters.model-version}} to {{inputs.parameters.environment}}..."
+          tag="{{inputs.parameters.environment}}-1.0.{{inputs.parameters.model-version}}"
+          app_name="immich-{{inputs.parameters.environment}}"
+
+          argocd login argocd-server.argocd.svc.cluster.local \
+            --username admin \
+            --password "$ARGOCD_PASSWORD" \
+            --insecure
+
+          argocd app set "$app_name" --helm-set-string image.tag=$tag
+          argocd app sync "$app_name"
+      env:
+        - name: ARGOCD_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: argocd-initial-admin-secret
+              key: password
