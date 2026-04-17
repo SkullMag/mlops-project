@@ -1,0 +1,82 @@
+---
+- name: Deploy Immich (open source service) via ArgoCD
+  hosts: node1
+  become: yes
+  vars:
+    argocd_username: "admin"
+    repo_path: "https://github.com/SkullMag/mlops-project.git"
+    app_name: "immich"
+    app_path: "mlops/k8s/immich"
+
+  tasks:
+    - name: Get ArgoCD admin password from Kubernetes secret
+      command: >
+        kubectl get secret -n argocd argocd-initial-admin-secret
+        -o jsonpath="{.data.password}"
+      register: argocd_password_base64
+
+    - name: Decode ArgoCD admin password
+      shell: echo {{ argocd_password_base64.stdout }} | base64 --decode
+      register: argocd_password
+
+    - name: Log in to ArgoCD
+      command: >
+        argocd login localhost --username {{ argocd_username }}
+        --password "{{ argocd_password.stdout }}" --grpc-web --port-forward --port-forward-namespace=argocd
+      changed_when: false
+
+    - name: Ensure immich namespace exists
+      command: kubectl get namespace immich
+      register: ns_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create immich namespace if missing
+      when: ns_check.rc != 0
+      command: kubectl create namespace immich
+
+    # Postgres credentials for Immich's own database
+    - name: Check if Immich Postgres secret exists
+      command: kubectl get secret immich-postgres-credentials -n immich
+      register: immich_pg_check
+      failed_when: false
+      changed_when: false
+
+    - name: Generate Immich Postgres password
+      when: immich_pg_check.rc != 0
+      set_fact:
+        immich_pg_password: "{{ lookup('password', '/dev/null length=20 chars=ascii_letters,digits') }}"
+
+    - name: Create Immich Postgres credentials secret
+      when: immich_pg_check.rc != 0
+      command: >
+        kubectl create secret generic immich-postgres-credentials
+        --namespace immich
+        --from-literal=password={{ immich_pg_password }}
+        --from-literal=postgres-password={{ immich_pg_password }}
+
+    - name: Check if ArgoCD application exists
+      command: >
+        argocd app get {{ app_name }} --port-forward --port-forward-namespace=argocd
+      register: app_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create ArgoCD Helm application if missing
+      when: app_check.rc != 0
+      command: >
+        argocd app create {{ app_name }}
+        --repo {{ repo_path }}
+        --path {{ app_path }}
+        --dest-server https://kubernetes.default.svc
+        --dest-namespace immich
+        --port-forward --port-forward-namespace=argocd
+        --sync-policy automated --self-heal
+      register: app_create
+
+    - name: Update ArgoCD Helm application if it exists
+      when: app_check.rc == 0
+      command: >
+        argocd app set {{ app_name }}
+        --dest-namespace immich
+        --port-forward --port-forward-namespace=argocd

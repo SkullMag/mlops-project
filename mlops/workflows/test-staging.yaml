@@ -1,0 +1,146 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: test-staging
+spec:
+  entrypoint: test-flow
+  arguments:
+    parameters:
+    - name: model-version
+    - name: staging-namespace
+      value: "immich-staging"
+    - name: staging-service
+      value: "immich-tagger"
+    - name: staging-port
+      value: "8082"
+
+  templates:
+  - name: test-flow
+    steps:
+      # Step 1: Integration test - verify /test endpoint returns valid prediction
+      - - name: integration-test
+          template: check-predict
+          arguments:
+            parameters:
+            - name: service-url
+              value: "http://{{workflow.parameters.staging-service}}.{{workflow.parameters.staging-namespace}}.svc.cluster.local:{{workflow.parameters.staging-port}}"
+            - name: model-version
+              value: "{{workflow.parameters.model-version}}"
+
+      # Step 2: Mark as approved in MLflow if integration test passes
+      - - name: mark-staging-approved
+          template: set-staging-approved
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{workflow.parameters.model-version}}"
+          when: "'{{steps.integration-test.outputs.parameters.result}}' == 'pass'"
+
+      # Step 3: Branching logic - promote if tests pass
+      - - name: promote-on-success
+          template: trigger-promote
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{workflow.parameters.model-version}}"
+          when: "'{{steps.integration-test.outputs.parameters.result}}' == 'pass'"
+
+  # Template: Check /test endpoint (predict with test image)
+  - name: check-predict
+    inputs:
+      parameters:
+      - name: service-url
+      - name: model-version
+    outputs:
+      parameters:
+      - name: result
+        valueFrom:
+          path: /tmp/result.txt
+    script:
+      image: curlimages/curl:latest
+      command: [sh]
+      source: |
+        #!/bin/sh
+        echo "Testing integration: {{inputs.parameters.service-url}}/test"
+
+        EXPECTED_VERSION="1.0.{{inputs.parameters.model-version}}"
+
+        # Wait for service to be ready AND serving the expected model version (max 60 seconds)
+        for i in $(seq 1 12); do
+          VERSION_RESP=$(curl -s "{{inputs.parameters.service-url}}/version" 2>/dev/null || true)
+          if echo "$VERSION_RESP" | grep -q "$EXPECTED_VERSION"; then
+            echo "Service is ready with expected version: $EXPECTED_VERSION"
+            break
+          fi
+          echo "Waiting for expected version... ($i/12)"
+          sleep 5
+        done
+
+        VERSION_RESP=$(curl -s "{{inputs.parameters.service-url}}/version" 2>/dev/null || true)
+        if ! echo "$VERSION_RESP" | grep -q "$EXPECTED_VERSION"; then
+          echo "✗ Integration test FAILED: /version did not return expected version: $EXPECTED_VERSION"
+          echo "Response: $VERSION_RESP"
+          echo "fail" > /tmp/result.txt
+          exit 1
+        fi
+
+        # Call /test endpoint (runs inference with hardcoded test image)
+        RESPONSE=$(curl -s "{{inputs.parameters.service-url}}/test")
+        echo "Response: $RESPONSE"
+
+        # Verify response is not empty and is a valid food class name
+        if [ -z "$RESPONSE" ]; then
+          echo "✗ Integration test FAILED: Empty response"
+          echo "fail" > /tmp/result.txt
+          exit 1
+        elif echo "$RESPONSE" | grep -qE "(Bread|Dairy product|Dessert|Egg|Fried food|Meat|Noodles/Pasta|Rice|Seafood|Soup|Vegetable/Fruit)"; then
+          echo "✓ Integration test PASSED: Got valid prediction: $RESPONSE"
+          echo "pass" > /tmp/result.txt
+          exit 0
+        else
+          echo "✗ Integration test FAILED: Invalid response (not a valid food class)"
+          echo "$RESPONSE"
+          echo "fail" > /tmp/result.txt
+          exit 1
+        fi
+
+  # Template: Set staging-approved alias in MLflow
+  - name: set-staging-approved
+    inputs:
+      parameters:
+      - name: model-version
+    script:
+      image: python:3.11-slim
+      command: [sh, -c]
+      source: |
+        pip install mlflow-skinny > /dev/null
+        export MLFLOW_TRACKING_URI=http://mlflow.immich-platform.svc.cluster.local:8000
+
+        python -c "import mlflow; client = mlflow.tracking.MlflowClient(); client.set_registered_model_alias(name='ImmichTaggerModel', alias='staging-approved', version='{{inputs.parameters.model-version}}')"
+
+        echo "✓ Model version {{inputs.parameters.model-version}} marked as 'staging-approved' in MLflow"
+        echo "This version has successfully passed all staging tests"
+
+  # Template: Trigger promote-model workflow
+  - name: trigger-promote
+    inputs:
+      parameters:
+      - name: model-version
+    resource:
+      action: create
+      manifest: |
+        apiVersion: argoproj.io/v1alpha1
+        kind: Workflow
+        metadata:
+          generateName: promote-model-
+        spec:
+          workflowTemplateRef:
+            name: promote-model
+          arguments:
+            parameters:
+            - name: source-environment
+              value: "staging"
+            - name: target-environment
+              value: "canary"
+            - name: model-version
+              value: "{{inputs.parameters.model-version}}"

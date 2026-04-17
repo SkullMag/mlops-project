@@ -1,0 +1,273 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: build-container-image
+spec:
+  entrypoint: buildkit-rootless-build-flow
+  arguments:
+    parameters:
+    - name: model-version
+
+  # Compatibility: some clusters ignore seccompProfile/appArmorProfile fields
+  # (or enforce defaults) unless annotations are also set.
+  podMetadata:
+    annotations:
+      seccomp.security.alpha.kubernetes.io/pod: unconfined
+      container.apparmor.security.beta.kubernetes.io/main: unconfined
+
+  volumeClaimTemplates:
+  - metadata:
+      name: workdir
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 2Gi
+
+  volumes:
+  - name: buildkitd
+    emptyDir: {}
+  - name: pip-cache
+    emptyDir: {}
+
+  templates:
+  - name: buildkit-rootless-build-flow
+    steps:
+      - - name: clone-repo
+          template: git-clone
+      - - name: fetch-model
+          template: download-model
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{workflow.parameters.model-version}}"
+      - - name: buildkit-build
+          template: buildkit-rootless
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{workflow.parameters.model-version}}"
+      - - name: tag-model-staging
+          template: set-mlflow-alias
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{workflow.parameters.model-version}}"
+      - - name: deploy-to-staging
+          template: trigger-deploy
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{workflow.parameters.model-version}}"
+            - name: environment
+              value: "staging"
+      - - name: test-staging
+          template: trigger-test
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{workflow.parameters.model-version}}"
+
+  - name: git-clone
+    retryStrategy:
+      limit: "5"
+      retryPolicy: "Always"
+      backoff:
+        duration: "10s"
+        factor: "2"
+    container:
+      image: alpine/git:v2.26.2
+      workingDir: /mnt/workspace
+      env:
+      - name: GIT_TERMINAL_PROMPT
+        value: "0"
+      command: [git]
+      args:
+        - clone
+        - --depth
+        - "1"
+        - --filter=blob:none
+        - --no-tags
+        - --single-branch
+        - --branch
+        - workflow
+        - https://github.com/SkullMag/mlops-project.git
+        - .
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workspace
+
+  - name: download-model
+    retryStrategy:
+      limit: "5"
+      retryPolicy: "Always"
+      backoff:
+        duration: "10s"
+        factor: "2"
+    inputs:
+      parameters:
+      - name: model-version
+    container:
+      image: python:3.11-slim
+      env:
+      - name: PIP_DISABLE_PIP_VERSION_CHECK
+        value: "1"
+      - name: PIP_CACHE_DIR
+        value: /tmp/pip-cache
+      command: [sh, -c]
+      args:
+        - |
+          set -eu
+          pip install mlflow-skinny==3.9.0 > /dev/null
+          export MLFLOW_TRACKING_URI=http://mlflow.immich-platform.svc.cluster.local:8000
+          export MODEL_VERSION='{{inputs.parameters.model-version}}'
+          mkdir -p /tmp/mlflow_model
+
+          python - <<'PY'
+          import os
+          import sys
+          import mlflow
+          from mlflow.tracking import MlflowClient
+
+          NAME = "ImmichTaggerModel"
+          VERSION = os.environ["MODEL_VERSION"]
+
+          client = MlflowClient()
+          mv = client.get_model_version(NAME, VERSION)
+
+          print(f"Model version: {VERSION}", file=sys.stderr)
+          print(f"Model source: {mv.source}", file=sys.stderr)
+
+          # Download the model artifact directly using the source URI
+          # Source is like: runs:/{run_id}/model/food11.pth
+          downloaded_path = mlflow.artifacts.download_artifacts(
+              artifact_uri=mv.source,
+              dst_path="/mnt/workspace"
+          )
+          
+          print(f"Downloaded model to: {downloaded_path}", file=sys.stderr)
+
+          # Write version file
+          with open("/mnt/workspace/versions.txt", "w", encoding="utf-8") as f:
+              f.write(f"1.0.{VERSION}\n")
+          PY
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workspace
+      - name: pip-cache
+        mountPath: /tmp/pip-cache
+
+  - name: buildkit-rootless
+    retryStrategy:
+      limit: "3"
+      retryPolicy: "Always"
+      backoff:
+        duration: "30s"
+        factor: "2"
+    inputs:
+      parameters:
+      - name: model-version
+    container:
+      image: moby/buildkit:rootless
+      env:
+      - name: BUILDKITD_FLAGS
+        value: --oci-worker-no-process-sandbox
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "500m"
+        limits:
+          memory: "3Gi"
+          cpu: "1"
+
+      command: [buildctl-daemonless.sh]
+      args:
+        - build
+        - --frontend
+        - dockerfile.v0
+        - --local
+        - context=/mnt/workspace
+        - --local
+        - dockerfile=/mnt/workspace
+        - --output
+        - type=image,name=registry.kube-system.svc.cluster.local:5000/immich-tagger:staging-1.0.{{inputs.parameters.model-version}},push=true,registry.insecure=true
+        - --export-cache
+        - type=registry,ref=registry.kube-system.svc.cluster.local:5000/immich-tagger:buildcache,mode=max,registry.insecure=true
+        - --import-cache
+        - type=registry,ref=registry.kube-system.svc.cluster.local:5000/immich-tagger:buildcache,registry.insecure=true
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: Unconfined
+        appArmorProfile:
+          type: Unconfined
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workspace
+      - name: buildkitd
+        mountPath: /home/user/.local/share/buildkit
+
+  - name: set-mlflow-alias
+    retryStrategy:
+      limit: "5"
+      retryPolicy: "Always"
+      backoff:
+        duration: "10s"
+        factor: "2"
+    inputs:
+      parameters:
+      - name: model-version
+    script:
+      image: python:3.11-slim
+      command: [sh, -c]
+      source: |
+        export PIP_DISABLE_PIP_VERSION_CHECK=1
+        export PIP_CACHE_DIR=/tmp/pip-cache
+        pip install mlflow-skinny==3.9.0 > /dev/null
+        export MLFLOW_TRACKING_URI=http://mlflow.immich-platform.svc.cluster.local:8000
+        python -c "import mlflow; client = mlflow.tracking.MlflowClient(); client.set_registered_model_alias(name='ImmichTaggerModel', alias='staging', version='{{inputs.parameters.model-version}}')"
+      volumeMounts:
+      - name: pip-cache
+        mountPath: /tmp/pip-cache
+  
+  - name: trigger-deploy
+    inputs:
+      parameters:
+      - name: model-version
+      - name: environment
+    resource:
+      action: create
+      manifest: |
+        apiVersion: argoproj.io/v1alpha1
+        kind: Workflow
+        metadata:
+          generateName: deploy-container-image-
+        spec:
+          workflowTemplateRef:
+            name: deploy-container-image
+          arguments:
+            parameters:
+            - name: environment
+              value: "{{inputs.parameters.environment}}"
+            - name: model-version
+              value: "{{inputs.parameters.model-version}}"
+
+  - name: trigger-test
+    inputs:
+      parameters:
+      - name: model-version
+    resource:
+      action: create
+      manifest: |
+        apiVersion: argoproj.io/v1alpha1
+        kind: Workflow
+        metadata:
+          generateName: test-staging-
+        spec:
+          workflowTemplateRef:
+            name: test-staging
+          arguments:
+            parameters:
+            - name: model-version
+              value: "{{inputs.parameters.model-version}}"

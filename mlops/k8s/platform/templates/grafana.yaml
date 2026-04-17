@@ -1,0 +1,175 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: immich-platform
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-providers
+  namespace: immich-platform
+data:
+  providers.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: immich-platform
+data:
+  infra-overview.json: |
+    {
+      "title": "Infra Overview",
+      "schemaVersion": 39,
+      "timezone": "browser",
+      "panels": [
+        {
+          "type": "stat",
+          "title": "Nodes Up",
+          "targets": [{ "expr": "count(up{job=\"kubernetes-cadvisor\"}==1)" }],
+          "gridPos": {"x":0,"y":0,"w":6,"h":4}
+        },
+        {
+          "type": "timeseries",
+          "title": "Pod CPU by namespace",
+          "targets": [{ "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=~\"immich-.*\"}[5m])) by (namespace)" }],
+          "gridPos": {"x":6,"y":0,"w":18,"h":8}
+        },
+        {
+          "type": "timeseries",
+          "title": "Pod Memory by namespace",
+          "targets": [{ "expr": "sum(container_memory_working_set_bytes{namespace=~\"immich-.*\"}) by (namespace)" }],
+          "gridPos": {"x":0,"y":8,"w":12,"h":8}
+        },
+        {
+          "type": "timeseries",
+          "title": "Pod restarts",
+          "targets": [{ "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=~\"immich-.*\"}[1h])) by (namespace, pod)" }],
+          "gridPos": {"x":12,"y":8,"w":12,"h":8}
+        }
+      ]
+    }
+  ml-serving.json: |
+    {
+      "title": "ML Serving",
+      "schemaVersion": 39,
+      "timezone": "browser",
+      "panels": [
+        {
+          "type": "stat",
+          "title": "Production replicas ready",
+          "targets": [{ "expr": "kube_deployment_status_replicas_available{namespace=\"immich-production\",deployment=\"immich-tagger\"}" }],
+          "gridPos": {"x":0,"y":0,"w":6,"h":4}
+        },
+        {
+          "type": "stat",
+          "title": "Canary replicas ready",
+          "targets": [{ "expr": "kube_deployment_status_replicas_available{namespace=\"immich-canary\",deployment=\"immich-tagger\"}" }],
+          "gridPos": {"x":6,"y":0,"w":6,"h":4}
+        },
+        {
+          "type": "timeseries",
+          "title": "Requests per second (by env)",
+          "targets": [{ "expr": "sum(rate(http_requests_total{kubernetes_namespace=~\"immich-(production|canary|staging)\"}[1m])) by (kubernetes_namespace)" }],
+          "gridPos": {"x":0,"y":4,"w":24,"h":8}
+        },
+        {
+          "type": "timeseries",
+          "title": "p95 latency",
+          "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{kubernetes_namespace=~\"immich-(production|canary|staging)\"}[5m])) by (le, kubernetes_namespace))" }],
+          "gridPos": {"x":0,"y":12,"w":24,"h":8}
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: immich-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.2.0
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-credentials
+                  key: admin-password
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Viewer
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboards-providers
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboards-providers
+          configMap:
+            name: grafana-dashboards-providers
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: immich-platform
+spec:
+  selector:
+    app: grafana
+  ports:
+    - port: 3000
+      targetPort: 3000
+  externalIPs:
+    - {{ .Values.grafana.externalIP }}

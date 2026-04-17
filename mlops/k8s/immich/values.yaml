@@ -1,0 +1,56 @@
+# Values for the Immich upstream Helm chart.
+# Reference: https://github.com/immich-app/immich-charts/blob/main/charts/immich/values.yaml
+#
+# Our team's ML tagging feature runs in the immich-staging / immich-canary /
+# immich-production namespaces alongside Immich. The integration between Immich
+# and our ML serving endpoint is done at the application layer (by the
+# serving + data team members); DevOps's job is to make sure Immich runs
+# reliably in Kubernetes with persistent storage for photos + database.
+
+immich:
+  image:
+    tag: v1.118.2
+
+  env:
+    # Point Immich's built-in ML integration at our serving endpoint instead
+    # of the bundled one. The production environment is the default target.
+    IMMICH_MACHINE_LEARNING_URL: "http://immich-tagger.immich-production.svc.cluster.local:8080"
+
+    DB_HOSTNAME: immich-postgresql
+    DB_USERNAME: postgres
+    DB_DATABASE_NAME: immich
+    DB_PASSWORD:
+      valueFrom:
+        secretKeyRef:
+          name: immich-postgres-credentials
+          key: password
+
+    REDIS_HOSTNAME: immich-redis-master
+
+  # Disable the bundled ML service; we provide our own via immich-tagger.
+  machine-learning:
+    enabled: false
+
+  # Use the bundled PostgreSQL (separate from our MLflow Postgres).
+  postgresql:
+    enabled: true
+    auth:
+      existingSecret: immich-postgres-credentials
+      database: immich
+
+  redis:
+    enabled: true
+    architecture: standalone
+    auth:
+      enabled: false
+
+  server:
+    service:
+      type: ClusterIP
+
+  persistence:
+    library:
+      # For the initial implementation we rely on default local-path-provisioner
+      # storage. This can be swapped to a real PVC / object storage later.
+      size: 20Gi
+      accessMode: ReadWriteOnce

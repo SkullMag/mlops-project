@@ -1,0 +1,100 @@
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: GatewayClass
+metadata:
+  name: traefik
+spec:
+  controllerName: traefik.io/gateway-controller
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: immich-gateway-controller
+  namespace: immich-platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: immich-gateway-controller
+rules:
+- apiGroups: [""]
+  resources: ["services","endpoints","pods","nodes","secrets","namespaces"]
+  verbs: ["get","list","watch"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get","list","watch"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gatewayclasses","gateways","httproutes","referencegrants","tcproutes","tlsroutes","grpcroutes"]
+  verbs: ["get","list","watch"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gatewayclasses/status","gateways/status","httproutes/status","tcproutes/status","tlsroutes/status","grpcroutes/status"]
+  verbs: ["update","patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: immich-gateway-controller
+subjects:
+- kind: ServiceAccount
+  name: immich-gateway-controller
+  namespace: immich-platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: immich-gateway-controller
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich-gateway-controller
+  namespace: immich-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: immich-gateway
+  template:
+    metadata:
+      labels:
+        app: immich-gateway
+    spec:
+      serviceAccountName: immich-gateway-controller
+      containers:
+      - name: traefik
+        image: traefik:v3.1
+        args:
+        - --providers.kubernetesgateway=true
+        - --entrypoints.web.address=:8000
+        - --log.level=DEBUG
+        ports:
+        - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: immich-gateway
+  namespace: immich-platform
+spec:
+  selector:
+    app: immich-gateway
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8000
+  externalIPs:
+  - {{ .Values.gateway.externalIP }}
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: Gateway
+metadata:
+  name: immich-gateway
+  namespace: immich-platform
+spec:
+  gatewayClassName: traefik
+  listeners:
+  - name: web
+    port: 8000
+    protocol: HTTP
+    allowedRoutes:
+      namespaces:
+        from: All
+

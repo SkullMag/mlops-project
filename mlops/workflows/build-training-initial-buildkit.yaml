@@ -1,0 +1,125 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: buildkit-rootless-training-build-
+spec:
+  entrypoint: buildkit-rootless-build-flow
+  arguments:
+    parameters:
+    - name: branch
+      value: mlops
+
+  # Compatibility: some clusters ignore seccompProfile/appArmorProfile fields
+  # (or enforce defaults) unless annotations are also set.
+  podMetadata:
+    annotations:
+      seccomp.security.alpha.kubernetes.io/pod: unconfined
+      container.apparmor.security.beta.kubernetes.io/main: unconfined
+
+  volumeClaimTemplates:
+  - metadata:
+      name: workdir
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+
+  volumes:
+  - name: buildkitd
+    emptyDir: {}
+
+  templates:
+  - name: buildkit-rootless-build-flow
+    steps:
+      # Step 1: Clone the repository (shallow/filtered clone for speed)
+      - - name: clone-repo
+          template: git-clone
+          arguments:
+            parameters:
+            - name: branch
+              value: "{{workflow.parameters.branch}}"
+      # Step 2: Build the training image and push to registry as :latest
+      - - name: buildkit-build
+          template: buildkit-rootless
+
+  # Template: Shallow clone of the git repository for faster checkout
+  - name: git-clone
+    retryStrategy:
+      limit: "5"
+      retryPolicy: "Always"
+      backoff:
+        duration: "10s"
+        factor: "2"
+    inputs:
+      parameters:
+      - name: branch
+    container:
+      image: alpine/git:v2.26.2
+      workingDir: /mnt/workspace
+      env:
+      - name: GIT_TERMINAL_PROMPT
+        value: "0"
+      command: [git]
+      args:
+        - clone
+        - --depth
+        - "1"
+        - --filter=blob:none
+        - --no-tags
+        - --single-branch
+        - --branch
+        - "{{inputs.parameters.branch}}"
+        - https://github.com/SkullMag/mlops-project.git
+        - .
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workspace
+
+  # Template: Build container image using buildkit (rootless, no docker daemon required)
+  - name: buildkit-rootless
+    retryStrategy:
+      limit: "3"
+      retryPolicy: "Always"
+      backoff:
+        duration: "30s"
+        factor: "2"
+    container:
+      image: moby/buildkit:rootless
+      env:
+      - name: BUILDKITD_FLAGS
+        value: --oci-worker-no-process-sandbox
+      command: [buildctl-daemonless.sh]
+      args:
+        - build
+        - --frontend
+        - dockerfile.v0
+        - --local
+        - context=/mnt/workspace
+        - --local
+        - dockerfile=/mnt/workspace
+        - --output
+        - type=image,name=registry.kube-system.svc.cluster.local:5000/immich-tagger-train:latest,push=true,registry.insecure=true
+        - --export-cache
+        - type=registry,ref=registry.kube-system.svc.cluster.local:5000/immich-tagger-train:buildcache,mode=max,registry.insecure=true
+        - --import-cache
+        - type=registry,ref=registry.kube-system.svc.cluster.local:5000/immich-tagger-train:buildcache,registry.insecure=true
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "500m"
+        limits:
+          memory: "3Gi"
+          cpu: "1"
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: Unconfined
+        appArmorProfile:
+          type: Unconfined
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workspace
+      - name: buildkitd
+        mountPath: /home/user/.local/share/buildkit

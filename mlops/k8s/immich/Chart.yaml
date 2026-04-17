@@ -1,0 +1,9 @@
+apiVersion: v2
+name: immich
+version: 1.0.0
+description: Immich photo platform (official Helm chart, pinned version)
+
+dependencies:
+  - name: immich
+    version: 0.9.3
+    repository: https://immich-app.github.io/immich-charts

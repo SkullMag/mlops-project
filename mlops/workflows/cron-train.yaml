@@ -1,0 +1,38 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: cron-train
+spec:
+  # Cron schedule: Run daily at 2:00 AM UTC
+  # Format: minute hour day-of-month month day-of-week
+  # 0 2 * * * = At 02:00 (2am) every day
+  schedule: "0 2 * * *"
+
+  # Time zone for schedule (defaults to UTC if not specified)
+  timezone: "UTC"
+
+  # Keep last 3 completed workflows for debugging
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  # Workflow specification - this gets triggered on schedule
+  workflowSpec:
+    entrypoint: scheduled-training
+
+    templates:
+    - name: scheduled-training
+      steps:
+        - - name: trigger-train-workflow
+            template: trigger-train
+
+    - name: trigger-train
+      resource:
+        action: create
+        manifest: |
+          apiVersion: argoproj.io/v1alpha1
+          kind: Workflow
+          metadata:
+            generateName: train-model-
+          spec:
+            workflowTemplateRef:
+              name: train-model

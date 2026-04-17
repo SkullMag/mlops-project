@@ -1,0 +1,5 @@
+apiVersion: v2
+name: immich-production
+version: 1.0.0
+description: Immich Tagger Production Deployment
+

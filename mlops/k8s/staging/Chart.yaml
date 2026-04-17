@@ -1,0 +1,5 @@
+apiVersion: v2
+name: immich-staging
+version: 1.0.0
+description: Immich Tagger Staging Deployment
+
