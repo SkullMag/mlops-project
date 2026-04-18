@@ -35,6 +35,31 @@
       when: ns_check.rc != 0
       command: kubectl create namespace immich
 
+    # PVC for Immich photo library (must exist before Helm chart deploys)
+    - name: Check if immich-library PVC exists
+      command: kubectl get pvc immich-library -n immich
+      register: pvc_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create immich-library PVC
+      when: pvc_check.rc != 0
+      shell: |
+        cat <<'EOF' | kubectl apply -f -
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: immich-library
+          namespace: immich
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: local-path
+          resources:
+            requests:
+              storage: 20Gi
+        EOF
+
     # Postgres credentials for Immich's own database
     - name: Check if Immich Postgres secret exists
       command: kubectl get secret immich-postgres-credentials -n immich

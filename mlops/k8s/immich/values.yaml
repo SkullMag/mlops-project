@@ -18,7 +18,7 @@ immich:
       enabled: true
       size: 20Gi
       accessMode: ReadWriteOnce
-      existingClaim: "" 
+      existingClaim: "immich-library"
 
   # 3. Component Configuration
   machine-learning:

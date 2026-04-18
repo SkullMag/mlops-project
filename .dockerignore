@@ -1,0 +1,11 @@
+.git
+training/
+data/
+immich/
+mlops/
+serving/
+*.md
+*.ipynb
+__pycache__
+*.pyc
+.DS_Store
