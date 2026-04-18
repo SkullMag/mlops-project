@@ -36,23 +36,17 @@ LOG_DIR="/work/mlops-logs"
 
 # ─── Load config ──────────────────────────────────────────────────────────────
 ENV_FILE="$SCRIPT_DIR/deploy.env"
-if [[ ! -f "$ENV_FILE" ]]; then
-    echo "ERROR: $ENV_FILE not found."
-    echo "Copy deploy.env.template to deploy.env and fill in your credentials."
-    exit 1
+if [[ -f "$ENV_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
 fi
-# shellcheck disable=SC1090
-source "$ENV_FILE"
 
-# Validate required vars
-for var in CHAMELEON_CREDENTIAL_ID CHAMELEON_CREDENTIAL_SECRET OS_PROJECT_NAME SSH_KEY_NAME SSH_KEY_PATH GITHUB_REPO GITHUB_TOKEN; do
-    if [[ -z "${!var:-}" ]]; then
-        echo "ERROR: $var is not set in deploy.env"
-        exit 1
-    fi
-done
-
-# Defaults
+# Defaults — these work out of the box on Chameleon Jupyter
+OS_PROJECT_NAME="${OS_PROJECT_NAME:-CHI-251409}"
+SSH_KEY_NAME="${SSH_KEY_NAME:-id_rsa_chameleon}"
+SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_rsa_chameleon}"
+GITHUB_REPO="${GITHUB_REPO:-https://github.com/SkullMag/mlops-project.git}"
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 TF_VAR_suffix="${TF_VAR_suffix:-proj12}"
 LEASE_NAME="${LEASE_NAME:-lease_mlops_proj12}"
 LEASE_DURATION_HOURS="${LEASE_DURATION_HOURS:-12}"
@@ -62,8 +56,19 @@ POSTGRES_DB="${POSTGRES_DB:-mlflowdb}"
 export TF_VAR_suffix
 export TF_VAR_key="$SSH_KEY_NAME"
 
-# Build authenticated repo URL for pushing
-GITHUB_PUSH_URL="$(echo "$GITHUB_REPO" | sed "s|https://|https://${GITHUB_TOKEN}@|")"
+# Chameleon credentials — only needed for Terraform's clouds.yaml.
+# On Chameleon Jupyter, the openstack CLI is pre-authenticated from your login
+# session, so the lease stage works without these.
+# If clouds.yaml already exists (from a previous notebook run), these are optional.
+CHAMELEON_CREDENTIAL_ID="${CHAMELEON_CREDENTIAL_ID:-}"
+CHAMELEON_CREDENTIAL_SECRET="${CHAMELEON_CREDENTIAL_SECRET:-}"
+
+# Build authenticated repo URL for pushing (only if token provided)
+if [[ -n "$GITHUB_TOKEN" ]]; then
+    GITHUB_PUSH_URL="$(echo "$GITHUB_REPO" | sed "s|https://|https://${GITHUB_TOKEN}@|")"
+else
+    GITHUB_PUSH_URL="$GITHUB_REPO"
+fi
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 mkdir -p "$LOG_DIR"
@@ -211,8 +216,9 @@ stage_terraform() {
     log_section "Stage: terraform — Provision 3 VMs + floating IP"
     load_state
 
-    # Write clouds.yaml from env vars
-    cat > "$TF_DIR/clouds.yaml" <<EOF
+    # Write clouds.yaml from env vars, or reuse existing one
+    if [[ -n "$CHAMELEON_CREDENTIAL_ID" && -n "$CHAMELEON_CREDENTIAL_SECRET" ]]; then
+        cat > "$TF_DIR/clouds.yaml" <<EOF
 clouds:
   openstack:
     auth:
@@ -224,7 +230,14 @@ clouds:
     identity_api_version: 3
     auth_type: "v3applicationcredential"
 EOF
-    log "clouds.yaml written."
+        log "clouds.yaml written from deploy.env credentials."
+    elif [[ -f "$TF_DIR/clouds.yaml" ]]; then
+        log "Reusing existing clouds.yaml."
+    else
+        echo "ERROR: No clouds.yaml found and CHAMELEON_CREDENTIAL_ID/SECRET not set."
+        echo "Either set them in deploy.env, or create clouds.yaml manually from the template."
+        exit 1
+    fi
 
     cd "$TF_DIR"
 
@@ -406,6 +419,12 @@ stage_immich() {
 # ─── Stage: push-branches ────────────────────────────────────────────────────
 stage_push_branches() {
     log_section "Stage: push-branches — Push workflow-init branch to GitHub"
+
+    if [[ -z "$GITHUB_TOKEN" ]]; then
+        log "GITHUB_TOKEN not set — skipping auto-push."
+        log "Push the workflow-init branch manually, or set GITHUB_TOKEN in deploy.env."
+        return 0
+    fi
 
     local REPO_DIR="/work/mlops-project"
 
