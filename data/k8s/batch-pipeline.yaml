@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: batch-pipeline
+  namespace: data
+spec:
+  schedule: "0 0 * * 0"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: batch-pipeline
+            image: ghcr.io/skullmag/mlops-project-batch-pipeline:latest
+            env:
+            - name: APP_CRED_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: swift-credentials
+                  key: app_cred_secret
+          restartPolicy: Never

@@ -1,0 +1,80 @@
+---
+- name: Format and mount data volumes, move containerd storage
+  hosts: all
+  become: yes
+  vars:
+    # The attached volume typically appears as /dev/vdb on KVM@TACC
+    volume_device: /dev/vdb
+    mount_point: /mnt/data
+
+  tasks:
+    - name: Check if volume device exists
+      stat:
+        path: "{{ volume_device }}"
+      register: vol_dev
+
+    - name: Fail if volume not attached
+      fail:
+        msg: "Volume device {{ volume_device }} not found — has Terraform attached it?"
+      when: not vol_dev.stat.exists
+
+    - name: Check if volume already has a filesystem
+      command: blkid -o value -s TYPE {{ volume_device }}
+      register: fs_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create ext4 filesystem on volume
+      command: mkfs.ext4 -L data {{ volume_device }}
+      when: fs_check.rc != 0 or fs_check.stdout == ""
+
+    - name: Create mount point
+      file:
+        path: "{{ mount_point }}"
+        state: directory
+
+    - name: Mount volume
+      mount:
+        path: "{{ mount_point }}"
+        src: "{{ volume_device }}"
+        fstype: ext4
+        opts: defaults,noatime
+        state: mounted
+
+    - name: Check if containerd data already moved
+      stat:
+        path: "{{ mount_point }}/containerd"
+      register: containerd_moved
+
+    - name: Stop containerd
+      systemd:
+        name: containerd
+        state: stopped
+      when: not containerd_moved.stat.exists
+
+    - name: Move containerd data to volume
+      command: mv /var/lib/containerd {{ mount_point }}/containerd
+      when: not containerd_moved.stat.exists
+
+    - name: Create symlink for containerd
+      file:
+        src: "{{ mount_point }}/containerd"
+        dest: /var/lib/containerd
+        state: link
+        force: yes
+      when: not containerd_moved.stat.exists
+
+    - name: Start containerd
+      systemd:
+        name: containerd
+        state: started
+      when: not containerd_moved.stat.exists
+
+    - name: Verify disk space
+      command: df -h {{ mount_point }}
+      register: df_out
+      changed_when: false
+
+    - name: Show disk space
+      debug:
+        var: df_out.stdout

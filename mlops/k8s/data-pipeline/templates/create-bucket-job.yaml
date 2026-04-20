@@ -1,0 +1,42 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-data-bucket
+  namespace: data-pipeline
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 60
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: mc
+          image: minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1
+          env:
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: accesskey
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secretkey
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until mc alias set minio {{ .Values.minio.endpoint }} $MINIO_ACCESS_KEY $MINIO_SECRET_KEY; do
+                echo "Waiting for MinIO...";
+                sleep 5;
+              done
+              if ! mc ls minio/{{ .Values.minio.bucketName }}; then
+                mc mb minio/{{ .Values.minio.bucketName }};
+                echo "Bucket {{ .Values.minio.bucketName }} created.";
+              else
+                echo "Bucket {{ .Values.minio.bucketName }} already exists.";
+              fi

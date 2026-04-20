@@ -1,0 +1,51 @@
+# The outer 'immich:' key passes values to the "immich" dependency sub-chart.
+# Within the sub-chart, checks.yaml reads .Values.immich.* so we must double-nest.
+immich:
+  immich:
+    persistence:
+      library:
+        existingClaim: "immich-library"
+
+  # Required to suppress the deprecated-postgres-subchart error
+  useDeprecatedPostgresChart: true
+
+  image:
+    tag: v1.118.2
+
+  env:
+    IMMICH_MACHINE_LEARNING_URL: "http://immich-tagger.immich-production.svc.cluster.local:8080"
+    DB_PASSWORD:
+      valueFrom:
+        secretKeyRef:
+          name: immich-postgres-credentials
+          key: password
+
+  machine-learning:
+    enabled: false
+
+  postgresql:
+    enabled: true
+    global:
+      postgresql:
+        auth:
+          existingSecret: immich-postgres-credentials
+          secretKeys:
+            userPasswordKey: password
+
+  redis:
+    enabled: true
+    architecture: standalone
+    auth:
+      enabled: false
+    image:
+      registry: docker.io
+      repository: bitnami/redis
+      tag: latest
+
+  server:
+    enabled: true
+    probes:
+      startup:
+        spec:
+          failureThreshold: 90
+          periodSeconds: 10

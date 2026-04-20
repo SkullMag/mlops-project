@@ -1,0 +1,9 @@
+{
+  "request_id": "req_0001",
+  "model_version": "resnet50_v1",
+  "tags": [
+    { "label": "person", "confidence": 0.96 },
+    { "label": "dog", "confidence": 0.91 },
+    { "label": "bench", "confidence": 0.84 }
+  ]
+}

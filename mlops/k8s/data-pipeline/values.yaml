@@ -1,0 +1,11 @@
+minio:
+  endpoint: "http://minio.immich-platform.svc.cluster.local:9000"
+  accessKey: ""
+  secretKey: ""
+  bucketName: "proj12-data"
+
+registry: "registry.kube-system.svc.cluster.local:5000"
+
+onlineFeature:
+  servicePort: 8085
+  externalIP: ""

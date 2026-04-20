@@ -1,0 +1,4 @@
+apiVersion: v2
+name: data-pipeline
+version: 1.0.0
+description: Data pipeline components — ingestion, generation, batch processing, drift monitoring, online features, quality checks

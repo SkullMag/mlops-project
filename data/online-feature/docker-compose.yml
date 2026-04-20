@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  online-feature:
+    build: .
+    environment:
+      - APP_CRED_SECRET=${APP_CRED_SECRET}
+    ports:
+      - "8000:8000"

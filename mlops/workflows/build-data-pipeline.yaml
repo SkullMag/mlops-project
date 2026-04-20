@@ -1,0 +1,148 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: build-data-pipeline-
+spec:
+  entrypoint: build-all
+  podMetadata:
+    annotations:
+      seccomp.security.alpha.kubernetes.io/pod: unconfined
+      container.apparmor.security.beta.kubernetes.io/main: unconfined
+
+  volumeClaimTemplates:
+  - metadata:
+      name: workdir
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+
+  volumes:
+  - name: buildkitd
+    emptyDir: {}
+
+  templates:
+  - name: build-all
+    steps:
+      - - name: clone-repo
+          template: git-clone
+      - - name: build-data-ingestion
+          template: buildkit-build
+          arguments:
+            parameters:
+            - name: context
+              value: data/data-ingestion
+            - name: image-name
+              value: data-ingestion
+        - name: build-batch-pipeline
+          template: buildkit-build
+          arguments:
+            parameters:
+            - name: context
+              value: data/batch-pipeline
+            - name: image-name
+              value: batch-pipeline
+      - - name: build-data-generator
+          template: buildkit-build
+          arguments:
+            parameters:
+            - name: context
+              value: data/data-generator
+            - name: image-name
+              value: data-generator
+        - name: build-soda-checks
+          template: buildkit-build
+          arguments:
+            parameters:
+            - name: context
+              value: data/soda-checks
+            - name: image-name
+              value: soda-checks
+      - - name: build-drift-monitor
+          template: buildkit-build
+          arguments:
+            parameters:
+            - name: context
+              value: data/drift-monitor
+            - name: image-name
+              value: drift-monitor
+        - name: build-online-feature
+          template: buildkit-build
+          arguments:
+            parameters:
+            - name: context
+              value: data/online-feature
+            - name: image-name
+              value: online-feature
+
+  - name: git-clone
+    retryStrategy:
+      limit: "5"
+      retryPolicy: "Always"
+      backoff:
+        duration: "10s"
+        factor: "2"
+    container:
+      image: alpine/git:v2.26.2
+      workingDir: /mnt/workspace
+      command: [git]
+      args:
+        - clone
+        - --depth
+        - "1"
+        - --branch
+        - main
+        - --single-branch
+        - https://github.com/SkullMag/mlops-project.git
+        - .
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workspace
+
+  - name: buildkit-build
+    inputs:
+      parameters:
+      - name: context
+      - name: image-name
+    retryStrategy:
+      limit: "3"
+      retryPolicy: "Always"
+      backoff:
+        duration: "30s"
+        factor: "2"
+    container:
+      image: moby/buildkit:rootless
+      env:
+      - name: BUILDKITD_FLAGS
+        value: --oci-worker-no-process-sandbox
+      command: [buildctl-daemonless.sh]
+      args:
+        - build
+        - --frontend
+        - dockerfile.v0
+        - --local
+        - context=/mnt/workspace/{{inputs.parameters.context}}
+        - --local
+        - dockerfile=/mnt/workspace/{{inputs.parameters.context}}
+        - --output
+        - type=image,name=registry.kube-system.svc.cluster.local:5000/{{inputs.parameters.image-name}}:latest,push=true,registry.insecure=true
+      resources:
+        requests:
+          memory: "1Gi"
+          cpu: "500m"
+        limits:
+          memory: "2Gi"
+          cpu: "1"
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: Unconfined
+        appArmorProfile:
+          type: Unconfined
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workspace
+      - name: buildkitd
+        mountPath: /home/user/.local/share/buildkit

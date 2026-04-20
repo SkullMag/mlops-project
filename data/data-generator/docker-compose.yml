@@ -1,0 +1,8 @@
+version: '3.8'
+
+services:
+  data-generator:
+    build: .
+    environment:
+      - APP_CRED_SECRET=${APP_CRED_SECRET}
+    restart: unless-stopped

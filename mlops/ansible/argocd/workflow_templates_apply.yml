@@ -1,0 +1,62 @@
+---
+- name: Clone repo and apply specific Argo WorkflowTemplates
+  hosts: node1
+  become: yes
+  vars:
+    repo_url: https://github.com/SkullMag/mlops-project.git
+    repo_dest: /tmp/mlops-project
+    workflow_dir: mlops/workflows
+    argo_namespace: argo
+    templates:
+      - build-container-image.yaml
+      - deploy-container-image.yaml
+      - promote-model.yaml
+      - train-model.yaml
+      - test-staging.yaml
+      - rollback-production.yaml
+      - cron-train.yaml
+
+  tasks:
+    - name: Create persistent volume claim for training data cache
+      shell: |
+        kubectl apply -n {{ argo_namespace }} -f - <<'EOF'
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: training-data
+        spec:
+          accessModes: [ "ReadWriteOnce" ]
+          resources:
+            requests:
+              storage: 30Gi
+        EOF
+      register: training_pvc
+      changed_when: "'created' in training_pvc.stdout"
+
+    - name: Copy MinIO credentials to Argo namespace for training workflow
+      shell: |
+        kubectl get secret minio-credentials -n immich-platform -o json \
+          | jq 'del(.metadata.namespace, .metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp)' \
+          | kubectl apply -n {{ argo_namespace }} -f -
+      register: minio_secret_copy
+      changed_when: "'configured' in minio_secret_copy.stdout"
+
+    - name: Clone or update mlops-project repo
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ repo_dest }}"
+        version: main
+
+    - name: Apply selected WorkflowTemplates to Argo namespace
+      command: kubectl apply -n {{ argo_namespace }} -f {{ repo_dest }}/{{ workflow_dir }}/{{ item }}
+      loop: "{{ templates }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Verify applied WorkflowTemplates
+      command: kubectl get workflowtemplates -n {{ argo_namespace }}
+      register: wft_list
+
+    - name: Show WorkflowTemplates
+      debug:
+        var: wft_list.stdout

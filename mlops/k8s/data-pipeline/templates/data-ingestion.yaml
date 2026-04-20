@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-ingestion
+  namespace: data-pipeline
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 14400
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: data-ingestion
+          image: {{ .Values.registry }}/data-ingestion:latest
+          env:
+            - name: MINIO_ENDPOINT
+              value: {{ .Values.minio.endpoint }}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: accesskey
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secretkey
+            - name: BUCKET_NAME
+              value: {{ .Values.minio.bucketName }}
+          volumeMounts:
+            - name: work
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+      volumes:
+        - name: work
+          hostPath:
+            path: /mnt/data/data-ingestion-work
+            type: DirectoryOrCreate

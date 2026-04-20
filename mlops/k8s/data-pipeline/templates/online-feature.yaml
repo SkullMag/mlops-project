@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: online-feature
+  namespace: data-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: online-feature
+  template:
+    metadata:
+      labels:
+        app: online-feature
+    spec:
+      containers:
+        - name: online-feature
+          image: {{ .Values.registry }}/online-feature:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MINIO_ENDPOINT
+              value: {{ .Values.minio.endpoint }}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: accesskey
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secretkey
+            - name: BUCKET_NAME
+              value: {{ .Values.minio.bucketName }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: online-feature
+  namespace: data-pipeline
+spec:
+  selector:
+    app: online-feature
+  ports:
+    - port: {{ .Values.onlineFeature.servicePort }}
+      targetPort: 8000
+  externalIPs:
+    - {{ .Values.onlineFeature.externalIP }}
