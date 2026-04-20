@@ -158,7 +158,11 @@ def send_feedback(asset_id: str, tag_value: str, action: str) -> None:
 def detect_tag_changes(asset: dict) -> None:
     """Compare current tags with tracked state and send feedback for changes."""
     asset_id = asset["id"]
-    current_tags = get_ml_tag_values(asset)
+    # Search API doesn't include tags — fetch them from the asset detail endpoint
+    tags_list = get_asset_tags(asset_id)
+    current_tags = {
+        t["value"] for t in tags_list if t.get("value", "").startswith(f"{TAG_PREFIX}/")
+    }
     previous_tags = _asset_tags.get(asset_id)
 
     if previous_tags is None:
