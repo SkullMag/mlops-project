@@ -20,10 +20,14 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 MIN_SCORE = float(os.environ.get("MIN_SCORE", "0.5"))
 TAG_PREFIX = os.environ.get("TAG_PREFIX", "ml")
 
+FEEDBACK_URL = os.environ.get("FEEDBACK_URL", f"{TAGGER_URL}/feedback")
+
 HEADERS = {"x-api-key": IMMICH_API_KEY}
 
 # Track which assets we've already tagged (in-memory; resets on restart)
 _tagged_assets: set[str] = set()
+# Track current tags per asset to detect user additions/removals
+_asset_tags: dict[str, set[str]] = {}
 
 
 def get_all_assets() -> list[dict]:
@@ -123,6 +127,56 @@ def has_ml_tags(asset: dict) -> bool:
     return False
 
 
+def get_ml_tag_values(asset: dict) -> set[str]:
+    """Get set of ml/* tag values for an asset."""
+    return {
+        tag["value"]
+        for tag in asset.get("tags", [])
+        if tag.get("value", "").startswith(f"{TAG_PREFIX}/")
+    }
+
+
+def send_feedback(asset_id: str, tag_value: str, action: str) -> None:
+    """Send feedback event to the tagger service."""
+    try:
+        requests.post(
+            FEEDBACK_URL,
+            json={
+                "request_id": asset_id,
+                "image_id": asset_id,
+                "user_id": "immich-user",
+                "tag": tag_value,
+                "action": action,
+            },
+            timeout=10,
+        )
+        logger.info("  Feedback sent: %s %s on %s", action, tag_value, asset_id)
+    except Exception as e:
+        logger.warning("Failed to send feedback for %s: %s", asset_id, e)
+
+
+def detect_tag_changes(asset: dict) -> None:
+    """Compare current tags with tracked state and send feedback for changes."""
+    asset_id = asset["id"]
+    current_tags = get_ml_tag_values(asset)
+    previous_tags = _asset_tags.get(asset_id)
+
+    if previous_tags is None:
+        # First time seeing this asset — just record, don't send feedback
+        _asset_tags[asset_id] = current_tags
+        return
+
+    added = current_tags - previous_tags
+    removed = previous_tags - current_tags
+
+    for tag_value in added:
+        send_feedback(asset_id, tag_value, "added")
+    for tag_value in removed:
+        send_feedback(asset_id, tag_value, "deleted")
+
+    _asset_tags[asset_id] = current_tags
+
+
 def process_asset(asset: dict) -> None:
     """Classify a single asset and tag it."""
     asset_id = asset["id"]
@@ -155,6 +209,10 @@ def process_asset(asset: dict) -> None:
             logger.info("  Tagged: %s (%.2f)", tag_value, confidence)
 
         _tagged_assets.add(asset_id)
+        # Update tracked tags so the next poll doesn't report these as user-added
+        _asset_tags[asset_id] = get_ml_tag_values(asset) | {
+            f"{TAG_PREFIX}/{t['label']}" for t in tags if t["confidence"] >= MIN_SCORE
+        }
         logger.info("Applied %d tag(s) to asset %s", applied, asset_id)
 
     except Exception as e:
@@ -168,6 +226,11 @@ def main():
     while True:
         try:
             assets = get_all_assets()
+
+            # Detect tag changes (user additions/removals) on all known assets
+            for asset in assets:
+                detect_tag_changes(asset)
+
             untagged = [a for a in assets if a["id"] not in _tagged_assets and not has_ml_tags(a)]
 
             if untagged:
