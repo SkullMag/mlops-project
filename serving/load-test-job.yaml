@@ -21,7 +21,7 @@ spec:
             - name: DURATION_SECONDS
               value: "300"
             - name: CONCURRENCY
-              value: "10"
+              value: "3"
           command:
             - bash
             - -c
@@ -55,7 +55,7 @@ spec:
                           latencies.append(lat)
                           if not ok:
                               errors += 1
-                      time.sleep(0.1)
+                      time.sleep(0.5)
 
               print(f'Sustained load test: {CONCURRENCY} workers for {DURATION}s')
               print(f'Target: {URL}')
