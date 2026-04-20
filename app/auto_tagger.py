@@ -167,16 +167,20 @@ def detect_tag_changes(asset: dict) -> None:
 
     if previous_tags is None:
         # First time seeing this asset — just record, don't send feedback
+        logger.info("Baseline tags for %s: %s", asset_id[:8], current_tags)
         _asset_tags[asset_id] = current_tags
         return
 
-    added = current_tags - previous_tags
-    removed = previous_tags - current_tags
+    if current_tags != previous_tags:
+        added = current_tags - previous_tags
+        removed = previous_tags - current_tags
+        logger.info("Tag change on %s: prev=%s curr=%s added=%s removed=%s",
+                     asset_id[:8], previous_tags, current_tags, added, removed)
 
-    for tag_value in added:
-        send_feedback(asset_id, tag_value, "added")
-    for tag_value in removed:
-        send_feedback(asset_id, tag_value, "deleted")
+        for tag_value in added:
+            send_feedback(asset_id, tag_value, "added")
+        for tag_value in removed:
+            send_feedback(asset_id, tag_value, "deleted")
 
     _asset_tags[asset_id] = current_tags
 
@@ -242,7 +246,7 @@ def main():
                 for asset in untagged:
                     process_asset(asset)
             else:
-                logger.debug("No new assets to process (%d total, %d tagged)", len(assets), len(_tagged_assets))
+                logger.info("No new assets to process (%d total, %d tagged)", len(assets), len(_tagged_assets))
 
         except Exception as e:
             logger.error("Poll cycle failed: %s", e)
