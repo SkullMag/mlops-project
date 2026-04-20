@@ -97,7 +97,7 @@ data:
         {
           "type": "timeseries",
           "title": "p95 latency",
-          "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{kubernetes_namespace=~\"immich-(production|canary|staging)\"}[5m])) by (le, kubernetes_namespace))" }],
+          "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{kubernetes_namespace=~\"immich-(production|canary|staging)\"}[1m])) by (le, kubernetes_namespace))" }],
           "gridPos": {"x":0,"y":12,"w":24,"h":8}
         }
       ]
@@ -123,47 +123,47 @@ data:
         {
           "type": "stat",
           "title": "Avg Confidence (production)",
-          "targets": [{ "expr": "sum(rate(tagger_prediction_confidence_sum{environment=\"production\"}[5m])) / sum(rate(tagger_prediction_confidence_count{environment=\"production\"}[5m]))" }],
+          "targets": [{ "expr": "sum(rate(tagger_prediction_confidence_sum{environment=\"production\"}[1m])) / sum(rate(tagger_prediction_confidence_count{environment=\"production\"}[1m]))" }],
           "gridPos": {"x":12,"y":0,"w":6,"h":4}
         },
         {
           "type": "stat",
           "title": "p50 Inference Latency (production)",
-          "targets": [{ "expr": "histogram_quantile(0.5, sum(rate(tagger_inference_latency_seconds_bucket{environment=\"production\"}[5m])) by (le))" }],
+          "targets": [{ "expr": "histogram_quantile(0.5, sum(rate(tagger_inference_latency_seconds_bucket{environment=\"production\"}[1m])) by (le))" }],
           "gridPos": {"x":18,"y":0,"w":6,"h":4}
         },
         {
           "type": "timeseries",
           "title": "Predictions per second by class (top 10)",
-          "targets": [{ "expr": "topk(10, sum(rate(tagger_predictions_total{environment=\"production\"}[5m])) by (label))", "legendFormat": "{{ "{{" }} label {{ "}}" }}" }],
+          "targets": [{ "expr": "topk(10, sum(rate(tagger_predictions_total{environment=\"production\"}[1m])) by (label))", "legendFormat": "{{ "{{" }} label {{ "}}" }}" }],
           "gridPos": {"x":0,"y":4,"w":24,"h":8}
         },
         {
           "type": "histogram",
           "title": "Prediction Confidence Distribution",
-          "targets": [{ "expr": "sum(rate(tagger_prediction_confidence_bucket{environment=\"production\"}[5m])) by (le)" }],
+          "targets": [{ "expr": "sum(rate(tagger_prediction_confidence_bucket{environment=\"production\"}[1m])) by (le)" }],
           "gridPos": {"x":0,"y":12,"w":12,"h":8}
         },
         {
           "type": "timeseries",
           "title": "Model Inference Latency (p50, p95, p99)",
           "targets": [
-            { "expr": "histogram_quantile(0.5, sum(rate(tagger_inference_latency_seconds_bucket{environment=\"production\"}[5m])) by (le))", "legendFormat": "p50" },
-            { "expr": "histogram_quantile(0.95, sum(rate(tagger_inference_latency_seconds_bucket{environment=\"production\"}[5m])) by (le))", "legendFormat": "p95" },
-            { "expr": "histogram_quantile(0.99, sum(rate(tagger_inference_latency_seconds_bucket{environment=\"production\"}[5m])) by (le))", "legendFormat": "p99" }
+            { "expr": "histogram_quantile(0.5, sum(rate(tagger_inference_latency_seconds_bucket{environment=\"production\"}[1m])) by (le))", "legendFormat": "p50" },
+            { "expr": "histogram_quantile(0.95, sum(rate(tagger_inference_latency_seconds_bucket{environment=\"production\"}[1m])) by (le))", "legendFormat": "p95" },
+            { "expr": "histogram_quantile(0.99, sum(rate(tagger_inference_latency_seconds_bucket{environment=\"production\"}[1m])) by (le))", "legendFormat": "p99" }
           ],
           "gridPos": {"x":12,"y":12,"w":12,"h":8}
         },
         {
           "type": "timeseries",
           "title": "Feedback Rate by Action",
-          "targets": [{ "expr": "sum(rate(tagger_feedback_total[5m])) by (action, environment)", "legendFormat": "{{ "{{" }} environment {{ "}}" }} / {{ "{{" }} action {{ "}}" }}" }],
+          "targets": [{ "expr": "sum(rate(tagger_feedback_total[1m])) by (action, environment)", "legendFormat": "{{ "{{" }} environment {{ "}}" }} / {{ "{{" }} action {{ "}}" }}" }],
           "gridPos": {"x":0,"y":20,"w":12,"h":8}
         },
         {
           "type": "timeseries",
           "title": "Avg Prediction Confidence (by env)",
-          "targets": [{ "expr": "sum(rate(tagger_prediction_confidence_sum[5m])) by (environment) / sum(rate(tagger_prediction_confidence_count[5m])) by (environment)", "legendFormat": "{{ "{{" }} environment {{ "}}" }}" }],
+          "targets": [{ "expr": "sum(rate(tagger_prediction_confidence_sum[1m])) by (environment) / sum(rate(tagger_prediction_confidence_count[1m])) by (environment)", "legendFormat": "{{ "{{" }} environment {{ "}}" }}" }],
           "gridPos": {"x":12,"y":20,"w":12,"h":8}
         }
       ]
