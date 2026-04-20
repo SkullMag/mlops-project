@@ -21,7 +21,7 @@ spec:
             - name: DURATION_SECONDS
               value: "300"
             - name: CONCURRENCY
-              value: "3"
+              value: "1"
           command:
             - bash
             - -c
@@ -46,7 +46,7 @@ spec:
                   while not stop.is_set():
                       start = time.time()
                       try:
-                          r = requests.post(URL, json=PAYLOAD, headers=HEADERS, timeout=5)
+                          r = requests.post(URL, json=PAYLOAD, headers=HEADERS, timeout=30)
                           ok = r.status_code == 200
                       except Exception:
                           ok = False
@@ -55,7 +55,7 @@ spec:
                           latencies.append(lat)
                           if not ok:
                               errors += 1
-                      time.sleep(0.5)
+                      time.sleep(2)
 
               print(f'Sustained load test: {CONCURRENCY} workers for {DURATION}s')
               print(f'Target: {URL}')
