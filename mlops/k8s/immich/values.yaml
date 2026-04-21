@@ -45,10 +45,11 @@ immich:
   server:
     enabled: true
     service:
-      type: NodePort
-      ports:
-        http:
-          nodePort: 2283
+      main:
+        type: NodePort
+        ports:
+          http:
+            nodePort: 2283
     probes:
       startup:
         spec:
