@@ -43,6 +43,16 @@
       failed_when: false
       changed_when: false
 
+    - name: Read Immich API key from state file
+      shell: grep '^IMMICH_API_KEY=' /work/.mlops_state | cut -d= -f2-
+      register: immich_api_key_result
+      failed_when: false
+      changed_when: false
+
+    - name: Set Immich API key fact
+      set_fact:
+        immich_api_key: "{{ immich_api_key_result.stdout | default('CHANGEME') }}"
+
     - name: Create ArgoCD Helm app if not exists
       when: app_check.rc != 0
       command: >
@@ -52,6 +62,7 @@
         --dest-server https://kubernetes.default.svc \
         --dest-namespace "" \
         --helm-set-string service.externalIP={{ external_ip }} \
+        --helm-set-string immichApiKey={{ immich_api_key }} \
         --sync-policy automated --self-heal \
         --port-forward --port-forward-namespace={{ argocd_namespace }}
 
@@ -60,6 +71,7 @@
       command: >
         argocd app set {{ app_name }} \
         --helm-set-string service.externalIP={{ external_ip }} \
+        --helm-set-string immichApiKey={{ immich_api_key }} \
         --port-forward --port-forward-namespace={{ argocd_namespace }}
 
     - name: Display ArgoCD app status
