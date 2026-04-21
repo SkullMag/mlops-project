@@ -1,7 +1,7 @@
 ---
 - name: Disable and Mask firewalld
   hosts: all
-  become: yes  # Run tasks as root
+  become: yes
 
   tasks:
     - name: Stop firewalld service
@@ -15,7 +15,54 @@
         name: firewalld
         masked: yes
 
-- name: Set up insecure registry for Docker
+- name: Format and mount block storage volume
+  hosts: node1,node2,node3
+  become: yes
+
+  tasks:
+    - name: Check if /dev/vdb exists
+      stat:
+        path: /dev/vdb
+      register: vdb_device
+
+    - name: Check if /dev/vdb already has a filesystem
+      command: blkid -o value -s TYPE /dev/vdb
+      register: vdb_fstype
+      failed_when: false
+      changed_when: false
+      when: vdb_device.stat.exists
+
+    - name: Format /dev/vdb as ext4
+      command: mkfs.ext4 -F /dev/vdb
+      when: vdb_device.stat.exists and vdb_fstype.stdout == ""
+
+    - name: Create /mnt/data mount point
+      file:
+        path: /mnt/data
+        state: directory
+        mode: '0755'
+      when: vdb_device.stat.exists
+
+    - name: Mount /dev/vdb to /mnt/data
+      mount:
+        path: /mnt/data
+        src: /dev/vdb
+        fstype: ext4
+        state: mounted
+        opts: defaults,nofail
+      when: vdb_device.stat.exists
+
+    - name: Create subdirectories on block volume
+      file:
+        path: "/mnt/data/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - docker
+        - local-path-provisioner
+      when: vdb_device.stat.exists
+
+- name: Set up insecure registry and Docker data-root on block volume
   hosts: node1,node2,node3
   become: yes
 
@@ -23,26 +70,19 @@
     insecure_registry: "registry.kube-system.svc.cluster.local:5000"
 
   tasks:
-
     - name: Ensure /etc/docker directory exists
       file:
         path: /etc/docker
         state: directory
         mode: '0755'
 
-    - name: Create /etc/docker/daemon.json if not exists
-      file:
-        path: /etc/docker/daemon.json
-        state: touch
-        mode: '0644'
-
-    - name: Configure Docker daemon.json for insecure registry
+    - name: Configure Docker daemon.json with data-root on block volume
       copy:
         dest: /etc/docker/daemon.json
         content: |
           {
-            "registry-mirrors": ["http://kvm-dyn-129-114-25-246.tacc.chameleoncloud.org:5000"],
-            "insecure-registries": ["{{ insecure_registry }}", "kvm-dyn-129-114-25-246.tacc.chameleoncloud.org:5000"]
+            "data-root": "/mnt/data/docker",
+            "insecure-registries": ["{{ insecure_registry }}"]
           }
         owner: root
         group: root
