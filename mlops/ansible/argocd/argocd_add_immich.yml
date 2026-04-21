@@ -25,6 +25,10 @@
         --password "{{ argocd_password.stdout }}" --grpc-web --port-forward --port-forward-namespace=argocd
       changed_when: false
 
+    - name: Detect external IP starting with 10.56
+      set_fact:
+        external_ip: "{{ ansible_all_ipv4_addresses | select('match', '^10\\.56\\..*') | list | first }}"
+
     - name: Ensure immich namespace exists
       command: kubectl get namespace immich
       register: ns_check
@@ -97,6 +101,7 @@
         --dest-namespace immich
         --port-forward --port-forward-namespace=argocd
         --sync-policy automated --self-heal
+        --helm-set-string externalIP={{ external_ip }}
       register: app_create
 
     - name: Update ArgoCD Helm application if it exists
@@ -105,3 +110,4 @@
         argocd app set {{ app_name }}
         --dest-namespace immich
         --port-forward --port-forward-namespace=argocd
+        --helm-set-string externalIP={{ external_ip }}
