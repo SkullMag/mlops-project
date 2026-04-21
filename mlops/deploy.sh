@@ -75,9 +75,11 @@ log_section() { echo ""; echo "========================================"; echo "
 
 save_state() {
     # Upsert: replace if key exists, append if not
-    local key="$1" val="$2"
+    local key="$1" val="${2//\"/}"
+    val="${val//\'/}"
     if [[ -f "$STATE_FILE" ]] && grep -q "^${key}=" "$STATE_FILE"; then
-        sed -i "s|^${key}=.*|${key}=${val}|" "$STATE_FILE"
+        sed -i '' "s|^${key}=.*|${key}=${val}|" "$STATE_FILE" 2>/dev/null \
+            || sed -i "s|^${key}=.*|${key}=${val}|" "$STATE_FILE"
     else
         echo "${key}=${val}" >> "$STATE_FILE"
     fi
@@ -130,31 +132,53 @@ kubectl_cmd() {
 stage_prereqs() {
     log_section "Stage: prereqs — Install terraform, ansible, kubespray"
 
-    export PATH=/work/.local/bin:$PATH
-    export PYTHONUSERBASE=/work/.local
-    mkdir -p /work/.local/bin
+    # uv is required — install it if missing
+    if ! command -v uv &>/dev/null; then
+        log "Installing uv..."
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
+
+    # Create a venv for all Python dependencies (ansible, openstack CLI, kubespray)
+    local VENV_DIR="$SCRIPT_DIR/.venv"
+    if [[ ! -d "$VENV_DIR" ]]; then
+        log "Creating Python venv at $VENV_DIR..."
+        uv venv "$VENV_DIR"
+    fi
+    # shellcheck disable=SC1091
+    source "$VENV_DIR/bin/activate"
+
+    # Detect platform for binary downloads
+    local TF_OS TF_ARCH
+    case "$(uname -s)" in
+        Darwin) TF_OS="darwin" ;;
+        *)      TF_OS="linux" ;;
+    esac
+    case "$(uname -m)" in
+        arm64|aarch64) TF_ARCH="arm64" ;;
+        *)             TF_ARCH="amd64" ;;
+    esac
 
     # Terraform
     if command -v terraform &>/dev/null; then
         log "Terraform already installed: $(terraform version -json 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["terraform_version"])' 2>/dev/null || terraform version | head -1)"
     else
-        log "Installing Terraform..."
+        local LOCAL_BIN="$VENV_DIR/bin"
+        local TF_ZIP="terraform_1.14.4_${TF_OS}_${TF_ARCH}.zip"
+        log "Installing Terraform ($TF_OS/$TF_ARCH)..."
         cd /tmp
-        wget -q https://releases.hashicorp.com/terraform/1.14.4/terraform_1.14.4_linux_amd64.zip
-        unzip -o -q terraform_1.14.4_linux_amd64.zip
-        mv -f terraform /work/.local/bin/
-        rm -f terraform_1.14.4_linux_amd64.zip
+        curl -sSfLO "https://releases.hashicorp.com/terraform/1.14.4/${TF_ZIP}"
+        unzip -o -q "$TF_ZIP"
+        mv -f terraform "$LOCAL_BIN/"
+        rm -f "$TF_ZIP"
         log "Terraform installed: $(terraform version | head -1)"
     fi
 
-    # Ansible
-    if command -v ansible &>/dev/null; then
-        log "Ansible already installed: $(ansible --version | head -1)"
-    else
-        log "Installing Ansible..."
-        PYTHONUSERBASE=/work/.local pip install --user --quiet ansible-core==2.16.9 ansible==9.8.0
-        log "Ansible installed: $(ansible --version | head -1)"
-    fi
+    # Ansible + OpenStack CLI
+    log "Installing Ansible and OpenStack CLI..."
+    uv pip install --quiet ansible-core==2.16.9 ansible==9.8.0 \
+        python-openstackclient python-blazarclient
+    log "Ansible installed: $(ansible --version | head -1)"
 
     # Kubespray
     local KUBESPRAY_DIR="$ANSIBLE_DIR/k8s/kubespray"
@@ -167,7 +191,7 @@ stage_prereqs() {
     fi
 
     log "Installing Kubespray requirements..."
-    PYTHONUSERBASE=/work/.local pip install --user --quiet -r "$KUBESPRAY_DIR/requirements.txt"
+    uv pip install --quiet -r "$KUBESPRAY_DIR/requirements.txt"
 
     log "prereqs done."
 }
@@ -177,9 +201,9 @@ stage_lease() {
     log_section "Stage: lease — Reuse or create Chameleon VM reservation"
     load_state
 
-    export OS_AUTH_URL="https://kvm.tacc.chameleoncloud.org:5000/v3"
-    export OS_PROJECT_NAME
-    export OS_REGION_NAME="KVM@TACC"
+    # Authenticate via clouds.yaml (works locally and on Chameleon Jupyter)
+    export OS_CLIENT_CONFIG_FILE="$TF_DIR/clouds.yaml"
+    export OS_CLOUD="openstack"
 
     # Check if lease already exists (any name) and is ACTIVE
     local lease_status
@@ -187,14 +211,32 @@ stage_lease() {
 
     if [[ "$lease_status" == "ACTIVE" ]]; then
         log "Lease '$LEASE_NAME' already ACTIVE. Reusing."
-    elif [[ "$lease_status" == "NOT_FOUND" ]]; then
+    else
+        # Delete stale lease (TERMINATED, ERROR, etc.) before creating a new one
+        if [[ "$lease_status" != "NOT_FOUND" ]]; then
+            log "Lease '$LEASE_NAME' is $lease_status. Deleting stale lease..."
+            openstack reservation lease delete "$LEASE_NAME" 2>/dev/null || true
+            sleep 5
+        fi
+
         log "Creating lease '$LEASE_NAME' for $LEASE_DURATION_HOURS hours..."
         local FLAVOR_UUID
         FLAVOR_UUID=$(openstack flavor show m1.large -f value -c id)
 
+        local start_date end_date
+        if date -v+30S &>/dev/null; then
+            # macOS date
+            start_date=$(date -u -v+30S '+%Y-%m-%d %H:%M')
+            end_date=$(date -u -v+${LEASE_DURATION_HOURS}H '+%Y-%m-%d %H:%M')
+        else
+            # GNU date
+            start_date=$(date -u -d '+30 seconds' '+%Y-%m-%d %H:%M')
+            end_date=$(date -u -d "+${LEASE_DURATION_HOURS} hours" '+%Y-%m-%d %H:%M')
+        fi
+
         openstack reservation lease create "$LEASE_NAME" \
-            --start-date "$(date -u -d '+30 seconds' '+%Y-%m-%d %H:%M')" \
-            --end-date "$(date -u -d "+${LEASE_DURATION_HOURS} hours" '+%Y-%m-%d %H:%M')" \
+            --start-date "$start_date" \
+            --end-date "$end_date" \
             --reservation "resource_type=flavor:instance,flavor_id=${FLAVOR_UUID},amount=3" \
             2>&1 | tail -5
 
@@ -208,14 +250,12 @@ stage_lease() {
             log "  Status: $lease_status ($i/12)..."
             sleep 10
         done
-    else
-        log "Lease '$LEASE_NAME' exists with status: $lease_status. Proceeding."
     fi
 
     # Extract reservation flavor ID
     local RESERVATION_FLAVOR_ID
     RESERVATION_FLAVOR_ID=$(openstack reservation lease show "$LEASE_NAME" -f json -c reservations \
-        | python3 -c 'import sys, json; r = json.load(sys.stdin)["reservations"][0]; r = json.loads(r) if isinstance(r, str) else r; print(r["flavor_id"])')
+        | python3 -c 'import sys, json; raw = json.load(sys.stdin)["reservations"]; r = json.loads(raw) if isinstance(raw, str) else raw[0]; r = json.loads(r) if isinstance(r, str) else r; print(r["flavor_id"])')
 
     save_state "RESERVATION_FLAVOR_ID" "$RESERVATION_FLAVOR_ID"
     export TF_VAR_reservation="$RESERVATION_FLAVOR_ID"
@@ -277,8 +317,10 @@ EOF
     terraform init -input=false 2>&1 | tail -3
 
     # Check if already applied — reuse existing VMs
-    if terraform output -raw floating_ip_out &>/dev/null; then
-        FLOATING_IP=$(terraform output -raw floating_ip_out)
+    local tf_ip
+    tf_ip=$(terraform output -raw floating_ip_out 2>/dev/null || echo "")
+    if [[ "$tf_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        FLOATING_IP="$tf_ip"
         log "Terraform already applied. Reusing existing VMs."
     else
         log "Running terraform apply..."
@@ -372,8 +414,8 @@ stage_post_k8s() {
 
     # Extract and save important credentials
     local dashboard_token argocd_password
-    dashboard_token=$(grep "Dashboard token:" "$LOG_DIR/post-k8s.log" | sed "s/.*Dashboard token: //" | tr -d "'" | head -1)
-    argocd_password=$(grep "ArgoCD admin password:" "$LOG_DIR/post-k8s.log" | sed "s/.*ArgoCD admin password: //" | tr -d "'" | head -1)
+    dashboard_token=$(grep "Dashboard token:" "$LOG_DIR/post-k8s.log" | sed "s/.*Dashboard token: //" | tr -d "'\"" | head -1)
+    argocd_password=$(grep "ArgoCD admin password:" "$LOG_DIR/post-k8s.log" | sed "s/.*ArgoCD admin password: //" | tr -d "'\"" | head -1)
 
     if [[ -n "$dashboard_token" ]]; then
         save_state "DASHBOARD_TOKEN" "$dashboard_token"
@@ -406,7 +448,7 @@ stage_platform() {
 
     # Extract Grafana password if printed
     local grafana_pw
-    grafana_pw=$(grep "Grafana admin password:" "$LOG_DIR/platform.log" | sed "s/.*Grafana admin password: //" | tr -d "'" | head -1)
+    grafana_pw=$(grep "Grafana admin password:" "$LOG_DIR/platform.log" | sed "s/.*Grafana admin password: //" | tr -d "'\"" | head -1)
     if [[ -n "$grafana_pw" ]]; then
         save_state "GRAFANA_PASSWORD" "$grafana_pw"
         echo ""
@@ -617,9 +659,8 @@ stage_destroy() {
     terraform destroy -auto-approve 2>&1 | tail -10
 
     # Delete lease
-    export OS_AUTH_URL="https://kvm.tacc.chameleoncloud.org:5000/v3"
-    export OS_PROJECT_NAME
-    export OS_REGION_NAME="KVM@TACC"
+    export OS_CLIENT_CONFIG_FILE="$TF_DIR/clouds.yaml"
+    export OS_CLOUD="openstack"
     openstack reservation lease delete "$LEASE_NAME" 2>/dev/null || true
 
     # Clean state
@@ -629,8 +670,11 @@ stage_destroy() {
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
-export PATH=/work/.local/bin:$PATH
-export PYTHONUSERBASE=/work/.local
+# Activate venv if it exists (created by prereqs stage)
+if [[ -d "$SCRIPT_DIR/.venv" ]]; then
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/.venv/bin/activate"
+fi
 
 STAGE="${1:-all}"
 

@@ -1,0 +1,7 @@
+.venv/
+.mlops_state
+logs/
+tf/kvm/clouds.yaml
+tf/kvm/.terraform/
+tf/kvm/.terraform.lock.hcl
+tf/kvm/terraform.tfstate*
