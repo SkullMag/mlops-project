@@ -473,6 +473,58 @@ stage_immich() {
     ansible-playbook -i inventory.yml argocd/argocd_add_immich.yml \
         2>&1 | tee "$LOG_DIR/immich.log"
 
+    # Wait for Immich server to be ready and create admin + API key
+    log "Waiting for Immich server to be ready..."
+    local immich_ready=false
+    for i in $(seq 1 60); do
+        if ssh_cmd "curl -sf http://immich-server.immich.svc.cluster.local:2283/api/server/config" &>/dev/null; then
+            immich_ready=true
+            break
+        fi
+        log "  Immich not ready yet ($i/60)..."
+        sleep 10
+    done
+
+    if [[ "$immich_ready" == "true" ]]; then
+        log "Creating Immich admin account and API key..."
+        local IMMICH_API_KEY
+        IMMICH_API_KEY=$(ssh_cmd "bash -s" <<'IMMICH_SETUP'
+set -euo pipefail
+IMMICH_URL="http://immich-server.immich.svc.cluster.local:2283"
+ADMIN_EMAIL="admin@immich.local"
+ADMIN_PASSWORD="admin123"
+
+# Create admin account (idempotent — returns 400 if already exists)
+curl -sf "$IMMICH_URL/api/auth/admin-sign-up" \
+  -X POST -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\",\"name\":\"Admin\"}" >/dev/null 2>&1 || true
+
+# Login
+TOKEN=$(curl -sf "$IMMICH_URL/api/auth/login" \
+  -X POST -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["accessToken"])')
+
+# Create API key
+API_KEY=$(curl -sf "$IMMICH_URL/api/api-keys" \
+  -X POST -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"name":"auto-tagger","permissions":["all"]}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["secret"])')
+
+echo "$API_KEY"
+IMMICH_SETUP
+)
+        if [[ -n "$IMMICH_API_KEY" && "$IMMICH_API_KEY" != *"error"* ]]; then
+            save_state "IMMICH_API_KEY" "$IMMICH_API_KEY"
+            log "Immich API key created: ${IMMICH_API_KEY:0:10}..."
+        else
+            log "WARNING: Failed to create Immich API key. Set it manually later."
+        fi
+    else
+        log "WARNING: Immich server not ready after 10 minutes. API key not created."
+    fi
+
     log "immich done."
 }
 
