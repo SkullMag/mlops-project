@@ -7,7 +7,7 @@
     workflow_file: mlops/workflows/build-training-initial-buildkit.yaml
     workflow_name: build-training-initial-buildkit
     argo_namespace: argo
-    branch: mlops  # Default branch (can be overridden with -e branch=mlops-bad-arch)
+    branch: main  # Default branch (can be overridden with -e branch=some-other-branch)
 
   tasks:
     - name: Clone or update mlops-project repo
