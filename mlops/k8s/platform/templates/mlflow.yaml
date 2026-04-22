@@ -14,6 +14,27 @@ spec:
       labels:
         app: mlflow
     spec:
+      initContainers:
+        - name: ensure-bucket
+          image: minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1
+          env:
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: accesskey
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secretkey
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until mc alias set minio http://minio:9000 $MINIO_ACCESS_KEY $MINIO_SECRET_KEY; do
+                echo "Waiting for MinIO..."; sleep 5;
+              done
+              mc mb --ignore-existing minio/mlflow-artifacts
       containers:
         - name: mlflow
           image: ghcr.io/mlflow/mlflow:v3.9.0
