@@ -65,14 +65,14 @@ spec:
 
         EXPECTED_VERSION="1.0.{{inputs.parameters.model-version}}"
 
-        # Wait for service to be ready AND serving the expected model version (max 60 seconds)
-        for i in $(seq 1 12); do
+        # Wait for service to be ready AND serving the expected model version (max 120 seconds)
+        for i in $(seq 1 24); do
           VERSION_RESP=$(curl -s --connect-timeout 3 "{{inputs.parameters.service-url}}/version" 2>/dev/null || true)
           if echo "$VERSION_RESP" | grep -q "$EXPECTED_VERSION"; then
             echo "Service is ready with expected version: $EXPECTED_VERSION"
             break
           fi
-          echo "Waiting for expected version... ($i/12)"
+          echo "Waiting for expected version... ($i/24)"
           sleep 5
         done
 

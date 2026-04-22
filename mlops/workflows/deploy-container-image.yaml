@@ -66,6 +66,10 @@ spec:
 
           argocd app set "$app_name" --helm-set-string image.tag=$tag
           argocd app sync "$app_name"
+
+          echo "Waiting for rollout to complete..."
+          # Use argocd wait to block until the app is healthy
+          argocd app wait "$app_name" --timeout 300 || true
       env:
         - name: ARGOCD_PASSWORD
           valueFrom:
