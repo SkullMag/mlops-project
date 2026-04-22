@@ -26,9 +26,13 @@ spec:
 
   volumes:
   - name: buildkitd
-    emptyDir: {}
+    hostPath:
+      path: /mnt/data/buildkit-cache
+      type: DirectoryOrCreate
   - name: pip-cache
-    emptyDir: {}
+    hostPath:
+      path: /mnt/data/pip-cache
+      type: DirectoryOrCreate
 
   templates:
   - name: buildkit-rootless-build-flow

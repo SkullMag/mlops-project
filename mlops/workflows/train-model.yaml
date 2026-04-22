@@ -24,7 +24,9 @@ spec:
     persistentVolumeClaim:
       claimName: training-data
   - name: buildkitd
-    emptyDir: {}
+    hostPath:
+      path: /mnt/data/buildkit-cache
+      type: DirectoryOrCreate
 
   templates:
   - name: training-and-build
