@@ -28,6 +28,9 @@ HEADERS = {"x-api-key": IMMICH_API_KEY}
 _tagged_assets: set[str] = set()
 # Track current tags per asset to detect user additions/removals
 _asset_tags: dict[str, set[str]] = {}
+# Track confidence scores per asset per tag
+# So when user deletes a tag later, we know how confident the model was
+_asset_tag_confidences: dict[str, dict[str, float]] = {}
 
 
 def get_all_assets() -> list[dict]:
@@ -90,14 +93,12 @@ def classify_image(image_bytes: bytes) -> list[dict]:
 
 def upsert_tag(tag_value: str) -> str:
     """Create tag if it doesn't exist, return tag ID."""
-    # Check if tag exists
     resp = requests.get(f"{IMMICH_URL}/api/tags", headers=HEADERS, timeout=10)
     resp.raise_for_status()
     for tag in resp.json():
         if tag["value"] == tag_value:
             return tag["id"]
 
-    # Create tag
     resp = requests.post(
         f"{IMMICH_URL}/api/tags",
         headers={**HEADERS, "Content-Type": "application/json"},
@@ -136,8 +137,8 @@ def get_ml_tag_values(asset: dict) -> set[str]:
     }
 
 
-def send_feedback(asset_id: str, tag_value: str, action: str) -> None:
-    """Send feedback event to the tagger service."""
+def send_feedback(asset_id: str, tag_value: str, action: str, confidence: float = 1.0) -> None:
+    """Send feedback event to the tagger service with confidence score."""
     try:
         requests.post(
             FEEDBACK_URL,
@@ -147,10 +148,14 @@ def send_feedback(asset_id: str, tag_value: str, action: str) -> None:
                 "user_id": "immich-user",
                 "tag": tag_value,
                 "action": action,
+                "confidence": confidence,
             },
             timeout=10,
         )
-        logger.info("  Feedback sent: %s %s on %s", action, tag_value, asset_id)
+        logger.info(
+            "  Feedback sent: %s %s on %s (confidence=%.2f)",
+            action, tag_value, asset_id, confidence
+        )
     except Exception as e:
         logger.warning("Failed to send feedback for %s: %s", asset_id, e)
 
@@ -158,7 +163,6 @@ def send_feedback(asset_id: str, tag_value: str, action: str) -> None:
 def detect_tag_changes(asset: dict) -> None:
     """Compare current tags with tracked state and send feedback for changes."""
     asset_id = asset["id"]
-    # Search API doesn't include tags — fetch them from the asset detail endpoint
     tags_list = get_asset_tags(asset_id)
     current_tags = {
         t["value"] for t in tags_list if t.get("value", "").startswith(f"{TAG_PREFIX}/")
@@ -166,7 +170,6 @@ def detect_tag_changes(asset: dict) -> None:
     previous_tags = _asset_tags.get(asset_id)
 
     if previous_tags is None:
-        # First time seeing this asset — just record, don't send feedback
         logger.info("Baseline tags for %s: %s", asset_id[:8], current_tags)
         _asset_tags[asset_id] = current_tags
         return
@@ -174,13 +177,20 @@ def detect_tag_changes(asset: dict) -> None:
     if current_tags != previous_tags:
         added = current_tags - previous_tags
         removed = previous_tags - current_tags
-        logger.info("Tag change on %s: prev=%s curr=%s added=%s removed=%s",
-                     asset_id[:8], previous_tags, current_tags, added, removed)
+        logger.info(
+            "Tag change on %s: prev=%s curr=%s added=%s removed=%s",
+            asset_id[:8], previous_tags, current_tags, added, removed
+        )
 
         for tag_value in added:
-            send_feedback(asset_id, tag_value, "added")
+            # User added a tag model missed - confidence was 0
+            send_feedback(asset_id, tag_value, "added", confidence=0.0)
+
         for tag_value in removed:
-            send_feedback(asset_id, tag_value, "deleted")
+            # Look up original model confidence for this tag
+            # This tells us how confident the model was when it made this mistake
+            confidence = _asset_tag_confidences.get(asset_id, {}).get(tag_value, 1.0)
+            send_feedback(asset_id, tag_value, "deleted", confidence=confidence)
 
     _asset_tags[asset_id] = current_tags
 
@@ -192,7 +202,6 @@ def process_asset(asset: dict) -> None:
     if asset_id in _tagged_assets:
         return
 
-    # Skip if already has ML tags
     if has_ml_tags(asset):
         _tagged_assets.add(asset_id)
         return
@@ -202,6 +211,10 @@ def process_asset(asset: dict) -> None:
     try:
         image_bytes = download_asset_thumbnail(asset_id)
         tags = classify_image(image_bytes)
+
+        # Store confidence scores for this asset
+        # So when user deletes a tag later we know how confident model was
+        asset_confidences = {}
 
         applied = 0
         for tag_info in tags:
@@ -213,11 +226,17 @@ def process_asset(asset: dict) -> None:
             tag_value = f"{TAG_PREFIX}/{label}"
             tag_id = upsert_tag(tag_value)
             tag_asset(tag_id, asset_id)
+
+            # Store confidence for this tag
+            asset_confidences[tag_value] = confidence
+
             applied += 1
             logger.info("  Tagged: %s (%.2f)", tag_value, confidence)
 
+        # Save confidences to memory for future feedback lookups
+        _asset_tag_confidences[asset_id] = asset_confidences
+
         _tagged_assets.add(asset_id)
-        # Update tracked tags so the next poll doesn't report these as user-added
         _asset_tags[asset_id] = get_ml_tag_values(asset) | {
             f"{TAG_PREFIX}/{t['label']}" for t in tags if t["confidence"] >= MIN_SCORE
         }
@@ -235,18 +254,23 @@ def main():
         try:
             assets = get_all_assets()
 
-            # Detect tag changes (user additions/removals) on all known assets
             for asset in assets:
                 detect_tag_changes(asset)
 
             untagged = [a for a in assets if a["id"] not in _tagged_assets and not has_ml_tags(a)]
 
             if untagged:
-                logger.info("Found %d untagged asset(s) out of %d total", len(untagged), len(assets))
+                logger.info(
+                    "Found %d untagged asset(s) out of %d total",
+                    len(untagged), len(assets)
+                )
                 for asset in untagged:
                     process_asset(asset)
             else:
-                logger.info("No new assets to process (%d total, %d tagged)", len(assets), len(_tagged_assets))
+                logger.info(
+                    "No new assets to process (%d total, %d tagged)",
+                    len(assets), len(_tagged_assets)
+                )
 
         except Exception as e:
             logger.error("Poll cycle failed: %s", e)
