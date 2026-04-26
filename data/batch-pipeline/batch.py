@@ -1,6 +1,7 @@
 import os
 import json
 import boto3
+import requests
 from datetime import datetime, timedelta, timezone
 from botocore.exceptions import ClientError
 
@@ -11,6 +12,9 @@ MINIO_SECRET_KEY = os.environ["MINIO_SECRET_KEY"]
 BUCKET_NAME = os.environ.get("BUCKET_NAME", "proj12-data")
 
 TEST_USERS = {"user_001", "user_002", "user_003", "user_004", "user_005"}
+
+IMMICH_API_KEY = "3gPv2G1Tt2wRzm7uMNKeISlURlxCqN3NF8gqsMUzy6E"
+IMMICH_BASE_URL = "http://129.114.24.200:2283"
 
 def get_minio_client():
     return boto3.client(
@@ -61,10 +65,32 @@ def load_upload_events(s3):
     print(f"Loaded {len(uploads)} upload events")
     return uploads
 
+def fetch_and_store_image(s3, image_id, version):
+    """Fetch image from Immich and store in MinIO"""
+    url = f"{IMMICH_BASE_URL}/api/assets/{image_id}/original"
+    headers = {"x-api-key": IMMICH_API_KEY}
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 200:
+            key = f"datasets/v{version}/images/{image_id}.jpg"
+            s3.put_object(
+                Bucket=BUCKET_NAME,
+                Key=key,
+                Body=response.content
+            )
+            print(f"Fetched and stored image {image_id}")
+            return key
+        else:
+            print(f"Failed to fetch image {image_id}: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error fetching image {image_id}: {e}")
+        return None
+
 def apply_candidate_selection(events, uploads):
     print("Applying candidate selection filters...")
 
-    # FIX 3: Use timezone-aware datetime to match feedback timestamps
+    # FIX 3: Use timezone-aware datetime
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
 
     seen = set()
@@ -72,7 +98,6 @@ def apply_candidate_selection(events, uploads):
 
     for event in events:
         # Filter 1: time range - last 30 days
-        # fromisoformat handles +00:00 timezone correctly
         event_time = datetime.fromisoformat(event["timestamp"])
         if event_time < cutoff_date:
             continue
@@ -107,13 +132,12 @@ def split_data(events, uploads):
     print("Splitting data into train/val/test...")
 
     # FIX 1: Use image_id based split instead of user_id
-    # since all real users share "immich-user" as user_id
     all_images = list(set(e["image_id"] for e in events))
     all_images.sort()
     split_idx = int(len(all_images) * 0.8)
     train_images = set(all_images[:split_idx])
 
-    # Time based split - sort by timestamp first
+    # Time based split
     events_sorted = sorted(events, key=lambda x: x["timestamp"])
     n = len(events_sorted)
     train_end = int(n * 0.70)
@@ -126,13 +150,17 @@ def split_data(events, uploads):
     print(f"Train: {len(train)}, Val: {len(val)}, Test: {len(test)}")
     return train, val, test
 
-def build_dataset(events, uploads):
+def build_dataset(s3, events, uploads, version):
     dataset = []
     for event in events:
         upload = uploads.get(event["request_id"], {})
+
+        # Fetch actual image from Immich and store in MinIO
+        image_key = fetch_and_store_image(s3, event["image_id"], version)
+
         record = {
             "image_id": event["image_id"],
-            "image_uri": upload.get("image_uri", ""),
+            "image_uri": image_key if image_key else upload.get("image_uri", ""),
             "tag": event["tag"],
             "label": 1 if event["action"] == "added" else 0,
             "timestamp": event["timestamp"],
@@ -170,9 +198,10 @@ def main():
 
     train_events, val_events, test_events = split_data(candidates, uploads)
 
-    train_data = build_dataset(train_events, uploads)
-    val_data = build_dataset(val_events, uploads)
-    test_data = build_dataset(test_events, uploads)
+    # Pass s3 and version to build_dataset for image fetching
+    train_data = build_dataset(s3, train_events, uploads, version)
+    val_data = build_dataset(s3, val_events, uploads, version)
+    test_data = build_dataset(s3, test_events, uploads, version)
 
     upload_dataset(s3, train_data, "train", version)
     upload_dataset(s3, val_data, "val", version)
