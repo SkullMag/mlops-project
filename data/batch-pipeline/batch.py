@@ -112,14 +112,13 @@ def apply_candidate_selection(events, uploads):
             continue
         seen.add(dedup_key)
 
-        # Filter 4: confidence check only if upload exists
-        # Real Immich feedback won't always have a matching upload event
-        if event["request_id"] in uploads:
-            upload = uploads[event["request_id"]]
-            confidence_scores = upload.get("confidence_scores", {})
-            confidence = confidence_scores.get(event["tag"], 1.0)
-            if confidence < 0.3:
-                continue
+        # Filter 4: confidence check directly from feedback event
+        # confidence=0.0 means user added a tag model missed (always keep)
+        # confidence=1.0 is default when no confidence info available
+        # We filter out low confidence deletions (model was already unsure)
+        confidence = event.get("confidence", 1.0)
+        if event.get("action") == "deleted" and confidence < 0.3:
+            continue
 
         filtered.append(event)
 
@@ -159,6 +158,7 @@ def build_dataset(s3, events, uploads, version):
             "image_uri": image_key if image_key else upload.get("image_uri", ""),
             "tag": event["tag"],
             "label": 1 if event["action"] == "added" else 0,
+            "confidence": event.get("confidence", 1.0),
             "timestamp": event["timestamp"],
             "user_id": event["user_id"]
         }
