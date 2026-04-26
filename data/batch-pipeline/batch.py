@@ -90,7 +90,7 @@ def fetch_and_store_image(s3, image_id, version):
 def apply_candidate_selection(events, uploads):
     print("Applying candidate selection filters...")
 
-    # FIX 3: Use timezone-aware datetime
+    # Use timezone-aware datetime to match feedback timestamps
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
 
     seen = set()
@@ -112,16 +112,14 @@ def apply_candidate_selection(events, uploads):
             continue
         seen.add(dedup_key)
 
-        # Filter 4: only include if upload exists
-        if event["request_id"] not in uploads:
-            continue
-
-        # FIX 2: Safe fallback if confidence_scores doesn't exist
-        upload = uploads[event["request_id"]]
-        confidence_scores = upload.get("confidence_scores", {})
-        confidence = confidence_scores.get(event["tag"], 1.0)
-        if confidence < 0.3:
-            continue
+        # Filter 4: confidence check only if upload exists
+        # Real Immich feedback won't always have a matching upload event
+        if event["request_id"] in uploads:
+            upload = uploads[event["request_id"]]
+            confidence_scores = upload.get("confidence_scores", {})
+            confidence = confidence_scores.get(event["tag"], 1.0)
+            if confidence < 0.3:
+                continue
 
         filtered.append(event)
 
@@ -131,13 +129,11 @@ def apply_candidate_selection(events, uploads):
 def split_data(events, uploads):
     print("Splitting data into train/val/test...")
 
-    # FIX 1: Use image_id based split instead of user_id
+    # Use image_id based split since all real users share "immich-user"
     all_images = list(set(e["image_id"] for e in events))
     all_images.sort()
-    split_idx = int(len(all_images) * 0.8)
-    train_images = set(all_images[:split_idx])
 
-    # Time based split
+    # Time based split - sort by timestamp
     events_sorted = sorted(events, key=lambda x: x["timestamp"])
     n = len(events_sorted)
     train_end = int(n * 0.70)
@@ -198,7 +194,6 @@ def main():
 
     train_events, val_events, test_events = split_data(candidates, uploads)
 
-    # Pass s3 and version to build_dataset for image fetching
     train_data = build_dataset(s3, train_events, uploads, version)
     val_data = build_dataset(s3, val_events, uploads, version)
     test_data = build_dataset(s3, test_events, uploads, version)
