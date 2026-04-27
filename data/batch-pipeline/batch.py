@@ -24,6 +24,49 @@ def get_minio_client():
         aws_secret_access_key=MINIO_SECRET_KEY
     )
 
+def check_data_quality_passed(s3):
+    """Read latest soda quality report and check if data is safe to use"""
+    print("Checking data quality reports...")
+
+    # Find all quality reports
+    paginator = s3.get_paginator("list_objects_v2")
+    reports = []
+    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix="quality-reports/"):
+        for obj in page.get("Contents", []):
+            reports.append(obj["Key"])
+
+    if not reports:
+        print("No quality reports found — proceeding with caution!")
+        return True
+
+    # Get the latest report (sorted by name = sorted by timestamp)
+    latest_report_key = sorted(reports)[-1]
+    print(f"Reading quality report: {latest_report_key}")
+
+    response = s3.get_object(Bucket=BUCKET_NAME, Key=latest_report_key)
+    report = json.loads(response["Body"].read())
+
+    # Check if any FAIL status
+    failed_checks = [
+        check for check in report["checks"]
+        if check["status"] == "FAIL"
+    ]
+
+    if failed_checks:
+        print("DATA QUALITY FAILED! The following checks failed:")
+        for check in failed_checks:
+            print(f"  FAIL: {check['check']}")
+        return False
+
+    # Check if volume is sufficient
+    total_events = report.get("total_feedback_events", 0)
+    if total_events == 0:
+        print("No feedback events found in quality report!")
+        return False
+
+    print(f"Data quality PASSED! ({total_events} feedback events)")
+    return True
+
 def drop_ready_marker(s3, version, manifest):
     marker = {
         "version": version,
@@ -179,6 +222,12 @@ def main():
     version = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     print(f"Starting batch pipeline - version {version}")
 
+    # Step 1: Check data quality before proceeding
+    if not check_data_quality_passed(s3):
+        print("Aborting batch pipeline — data quality checks failed!")
+        return
+
+    # Step 2: Load feedback and upload events
     events = load_feedback_events(s3)
     uploads = load_upload_events(s3)
 
@@ -186,22 +235,27 @@ def main():
         print("No feedback events found!")
         return
 
+    # Step 3: Apply candidate selection filters
     candidates = apply_candidate_selection(events, uploads)
 
     if not candidates:
         print("No candidates after filtering!")
         return
 
+    # Step 4: Split into train/val/test
     train_events, val_events, test_events = split_data(candidates, uploads)
 
+    # Step 5: Build datasets with real images from Immich
     train_data = build_dataset(s3, train_events, uploads, version)
     val_data = build_dataset(s3, val_events, uploads, version)
     test_data = build_dataset(s3, test_events, uploads, version)
 
+    # Step 6: Upload datasets to MinIO
     upload_dataset(s3, train_data, "train", version)
     upload_dataset(s3, val_data, "val", version)
     upload_dataset(s3, test_data, "test", version)
 
+    # Step 7: Save manifest and drop READY marker
     manifest = {
         "version": version,
         "created_at": datetime.utcnow().isoformat(),
