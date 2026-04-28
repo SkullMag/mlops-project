@@ -1,0 +1,31 @@
+model:
+  type: "resnet50"
+  pretrained: true
+  num_classes: 80
+
+data:
+  source: "feedback"
+  feedback_dir: "/mnt/workspace/feedback_data"
+  image_size: 224
+  num_workers: 4
+
+training:
+  epochs: 5
+  batch_size: 32
+  learning_rate: 0.0001
+  optimizer: "adam"
+  weight_decay: 0.0001
+  scheduler: "cosine"
+  step_size: 5
+  step_gamma: 0.1
+
+evaluation:
+  top_k: 3
+  threshold: 0.5
+
+mlflow:
+  tracking_uri: "http://mlflow.immich-platform.svc.cluster.local:8000"
+  experiment_name: "immich-auto-tagging-finetune"
+  run_name: null
+
+seed: 42

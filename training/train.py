@@ -121,6 +121,15 @@ def main():
         cfg["model"]["type"], cfg["model"]["num_classes"],
         pretrained=cfg["model"]["pretrained"],
     ).to(device)
+
+    init_ckpt = os.environ.get("INIT_CHECKPOINT", "").strip()
+    if init_ckpt:
+        if not os.path.isfile(init_ckpt):
+            raise RuntimeError(f"INIT_CHECKPOINT set but file not found: {init_ckpt}")
+        print(f"Loading init weights from {init_ckpt}", flush=True)
+        state = torch.load(init_ckpt, map_location=device)
+        model.load_state_dict(state)
+
     criterion = nn.BCEWithLogitsLoss()
     optimizer = make_optimizer(model.parameters(), cfg)
     scheduler = make_scheduler(optimizer, cfg)

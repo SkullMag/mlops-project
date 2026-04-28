@@ -15,6 +15,7 @@
       - test-staging.yaml
       - rollback-production.yaml
       - cron-train.yaml
+      - cron-finetune.yaml
 
   tasks:
     - name: Create persistent volume claim for training data cache

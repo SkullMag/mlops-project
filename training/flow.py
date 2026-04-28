@@ -1,10 +1,16 @@
-"""Training orchestrator: downloads COCO data from MinIO, trains, registers model."""
+"""Training orchestrator. Two modes selected via the config's data.source:
+  - "coco" (default): pull COCO data from MinIO and train from scratch.
+  - "feedback": pull the latest READY user-feedback dataset from MinIO,
+    initialize from the current production checkpoint, and fine-tune.
+Both paths share the quality gate and registration logic.
+"""
 
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 import boto3
 import mlflow
@@ -221,6 +227,76 @@ def write_config(template_path, data_dir, output_path):
     return cfg
 
 
+def write_feedback_config(template_path, feedback_dir, output_path):
+    """Patch a feedback-mode config with the current MLflow URI and feedback_dir."""
+    with open(template_path) as f:
+        cfg = yaml.safe_load(f)
+    cfg["data"]["feedback_dir"] = feedback_dir
+    cfg["mlflow"]["tracking_uri"] = MLFLOW_TRACKING_URI
+    with open(output_path, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False)
+    print(f"Config written to {output_path}")
+    return cfg
+
+
+def download_production_checkpoint(dest_dir):
+    """Download the .pth artifact for the current production model. Returns the
+    local path, or None if no production model is registered yet (cold start)."""
+    client = mlflow.tracking.MlflowClient()
+    try:
+        mv = client.get_model_version_by_alias(MODEL_NAME, "production")
+    except mlflow.exceptions.MlflowException:
+        return None
+    artifacts = client.list_artifacts(mv.run_id)
+    pth = next((a.path for a in artifacts if a.path.endswith(".pth")), None)
+    if pth is None:
+        return None
+    os.makedirs(dest_dir, exist_ok=True)
+    local = client.download_artifacts(mv.run_id, pth, dest_dir)
+    print(f"  production checkpoint downloaded to {local}", flush=True)
+    return local
+
+
+def prepare_feedback_run(cfg):
+    """Download latest READY feedback dataset, validate, fetch production weights.
+
+    Returns (config_path, summary) on success, or (None, summary) on failure.
+    """
+    from feedback_dataset import (
+        download_feedback_dataset,
+        find_latest_ready_version,
+        validate_feedback_data,
+    )
+
+    feedback_dir = cfg["data"].get("feedback_dir", "/mnt/workspace/feedback_data")
+    s3 = get_s3()
+
+    print(f"Looking for latest READY dataset in s3://{BUCKET_NAME}/datasets/ ...")
+    version = find_latest_ready_version(s3, BUCKET_NAME)
+    if not version:
+        return None, {"failures": ["No READY dataset version found in MinIO"]}
+    print(f"  using dataset version v{version}")
+
+    download_feedback_dataset(s3, BUCKET_NAME, version, feedback_dir)
+
+    passed, summary = validate_feedback_data(feedback_dir)
+    summary["dataset_version"] = version
+    if not passed:
+        return None, summary
+
+    ckpt = download_production_checkpoint("/tmp/init_ckpt")
+    if ckpt:
+        os.environ["INIT_CHECKPOINT"] = ckpt
+        summary["init_from_production"] = True
+    else:
+        print("  no production model yet — training fine-tune from ImageNet weights")
+        summary["init_from_production"] = False
+
+    config_path = "/tmp/train_config.yaml"
+    write_feedback_config(CONFIG_TEMPLATE, feedback_dir, config_path)
+    return config_path, summary
+
+
 def get_production_f1():
     """Get best_f1 metric from the current production model. Returns None if no production model."""
     client = mlflow.tracking.MlflowClient()
@@ -300,16 +376,48 @@ def register_model(run_id):
     return result.version
 
 
-def main():
-    print("=" * 60)
-    print("Training Flow - COCO Multi-Label Classification")
-    print("=" * 60)
+def _abort_no_model_version(reason):
+    """Write empty /tmp/model_version so downstream Argo steps short-circuit."""
+    with open("/tmp/model_version", "w") as f:
+        f.write("")
+    print(f"\nAborted: {reason}")
+    print("Empty /tmp/model_version written.")
 
+
+def main():
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
-    # Load config early to check for max_files
     with open(CONFIG_TEMPLATE) as f:
         cfg = yaml.safe_load(f)
+
+    data_source = cfg.get("data", {}).get("source", "coco")
+
+    print("=" * 60)
+    if data_source == "feedback":
+        print("Training Flow - Fine-tune on user feedback")
+    else:
+        print("Training Flow - COCO Multi-Label Classification")
+    print("=" * 60)
+
+    if data_source == "feedback":
+        config_path, summary = prepare_feedback_run(cfg)
+        print(f"  train/val/test records: "
+              f"{summary.get('train_records')}/"
+              f"{summary.get('val_records')}/"
+              f"{summary.get('test_records')}")
+        print(f"  images: {summary.get('image_count')}, "
+              f"positive in-vocab: {summary.get('positive_records_in_vocab')}")
+        if config_path is None:
+            mlflow.set_experiment("ImmichTagger")
+            with mlflow.start_run(run_name="feedback-prep-failed"):
+                mlflow.log_param("data_source", "feedback")
+                for i, msg in enumerate(summary.get("failures", [])):
+                    mlflow.log_param(f"failure_{i}", msg[:250])
+            _abort_no_model_version("feedback data preparation failed")
+            return
+        run_training_and_register(config_path)
+        return
+
     max_files = cfg.get("data", {}).get("max_files")
 
     # Download data (incrementally syncs — skips files already on disk)
@@ -343,7 +451,6 @@ def main():
         for f in summary["failures"]:
             print(f"  - {f}")
 
-        # Log failure to MLflow so it's auditable
         mlflow.set_experiment("ImmichTagger")
         with mlflow.start_run(run_name="data-validation-failed"):
             mlflow.log_params({
@@ -354,10 +461,7 @@ def main():
             for i, f in enumerate(summary["failures"]):
                 mlflow.log_param(f"validation_failure_{i}", f[:250])
 
-        # Write empty model_version so downstream workflow steps skip
-        with open("/tmp/model_version", "w") as f:
-            f.write("")
-        print("\nAborted training. Empty /tmp/model_version written.")
+        _abort_no_model_version("COCO data validation failed")
         return
 
     print("\nData validation PASSED.")
@@ -366,7 +470,12 @@ def main():
     config_path = "/tmp/train_config.yaml"
     write_config(CONFIG_TEMPLATE, data_dir, config_path)
 
-    # Run training
+    run_training_and_register(config_path)
+
+
+def run_training_and_register(config_path):
+    """Shared tail of the pipeline: invoke train.py, apply the quality gate,
+    register on success, and write /tmp/model_version for the Argo step."""
     print("\n" + "=" * 60)
     print("Starting training ...")
     print("=" * 60)
@@ -377,37 +486,31 @@ def main():
 
     if result is None:
         print("Training returned no result", file=sys.stderr)
+        _abort_no_model_version("training returned no result")
         return
 
     run_id, best_f1 = result
     print(f"\nTraining complete. Run ID: {run_id}, Best F1: {best_f1:.4f}")
 
-    # Quality gate: check minimum threshold and compare against production
     print("\n" + "=" * 60)
     print("Quality Gate Check")
     print("=" * 60)
 
     gate_passed, gate_reason = quality_gate(run_id, best_f1)
-
     if not gate_passed:
-        print(f"\nQUALITY GATE FAILED: {gate_reason}")
-        with open("/tmp/model_version", "w") as f:
-            f.write("")
-        print("Empty /tmp/model_version written — skipping registration.")
+        _abort_no_model_version(f"quality gate failed: {gate_reason}")
         return
 
     print(f"Quality gate PASSED (F1={best_f1:.4f} >= {MIN_F1_THRESHOLD})")
 
-    # Register model
     version = register_model(run_id)
-
     if version:
-        os.makedirs("/tmp", exist_ok=True)
         with open("/tmp/model_version", "w") as f:
             f.write(str(version))
         print(f"\nModel version {version} written to /tmp/model_version")
     else:
         print("WARNING: Model registration failed", file=sys.stderr)
+        _abort_no_model_version("model registration returned no version")
 
 
 if __name__ == "__main__":

@@ -82,6 +82,10 @@ def get_transforms(image_size, train=False):
 
 def create_dataloaders(cfg):
     data = cfg["data"]
+    if data.get("source") == "feedback":
+        from feedback_dataset import create_feedback_dataloaders
+        return create_feedback_dataloaders(cfg)
+
     bs = cfg["training"]["batch_size"]
 
     train_ds = CocoMultiLabelDataset(

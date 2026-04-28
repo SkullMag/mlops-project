@@ -1,0 +1,38 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: cron-finetune
+spec:
+  # Run weekly on Sunday at 04:00 UTC, four hours after the batch-pipeline
+  # CronJob (data/k8s/batch-pipeline.yaml, "0 0 * * 0") publishes a fresh
+  # READY dataset to MinIO.
+  schedule: "0 4 * * 0"
+  timezone: "UTC"
+
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  workflowSpec:
+    entrypoint: scheduled-finetune
+
+    templates:
+    - name: scheduled-finetune
+      steps:
+        - - name: trigger-finetune-workflow
+            template: trigger-finetune
+
+    - name: trigger-finetune
+      resource:
+        action: create
+        manifest: |
+          apiVersion: argoproj.io/v1alpha1
+          kind: Workflow
+          metadata:
+            generateName: finetune-model-
+          spec:
+            workflowTemplateRef:
+              name: train-model
+            arguments:
+              parameters:
+              - name: train-config
+                value: configs/finetune.yaml
