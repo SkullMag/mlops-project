@@ -52,8 +52,12 @@ SSH_KEY_NAME="${SSH_KEY_NAME:-id_rsa_chameleon}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_rsa_chameleon}"
 GITHUB_REPO="${GITHUB_REPO:-https://github.com/SkullMag/mlops-project.git}"
 TF_VAR_suffix="${TF_VAR_suffix:-proj12}"
-LEASE_NAME="${LEASE_NAME:-lease_mlops_proj12}"
+# CPU lease (created by deploy.sh): 3× CPU_FLAVOR VMs at KVM@TACC
+LEASE_NAME="${LEASE_NAME:-lease_mlops_cpu_proj12}"
+# GPU lease (provided by the professor): 1× GPU VM at KVM@TACC (e.g. g1.h100.pci.1)
+GPU_LEASE_NAME="${GPU_LEASE_NAME:-production_proj12}"
 LEASE_DURATION_HOURS="${LEASE_DURATION_HOURS:-168}"
+CPU_FLAVOR="${CPU_FLAVOR:-m1.large}"
 MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minio-admin}"
 POSTGRES_USER="${POSTGRES_USER:-mlflow}"
 POSTGRES_DB="${POSTGRES_DB:-mlflowdb}"
@@ -110,7 +114,8 @@ ensure_floating_ip() {
         echo "ERROR: FLOATING_IP not set. Run the 'terraform' stage first, or set it in $STATE_FILE"
         exit 1
     fi
-    # Make sure ansible.cfg has the correct IP (macOS sed requires '' after -i)
+    # KVM@TACC: nodes have private IPs; ansible needs the floating IP in its
+    # ProxyCommand to reach them. macOS sed needs '' after -i, GNU sed doesn't.
     sed -i '' -E "s|cc@[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\"|cc@${FLOATING_IP}\"|" "$ANSIBLE_DIR/ansible.cfg" 2>/dev/null \
         || sed -i -E "s|cc@[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\"|cc@${FLOATING_IP}\"|" "$ANSIBLE_DIR/ansible.cfg"
     sed -i '' "s|cc@A\.B\.C\.D|cc@${FLOATING_IP}|" "$ANSIBLE_DIR/ansible.cfg" 2>/dev/null \
@@ -197,81 +202,260 @@ stage_prereqs() {
 }
 
 # ─── Stage: lease ─────────────────────────────────────────────────────────────
+#
+# KVM@TACC needs 2 Blazar leases:
+#   - GPU_LEASE_NAME (default "production_proj12") — already created by the
+#     professor, contains 1× GPU flavor (e.g. g1.h100.pci.1). We only read
+#     its dynamic flavor_id.
+#   - LEASE_NAME (default "lease_mlops_cpu_proj12") — created by this script,
+#     a single reservation with amount=3 of CPU_FLAVOR (default m1.large).
+#
+# Both flavor_ids are written to .mlops_state for the terraform stage.
+# Helper: parse reservations from `openstack reservation lease show -f json`.
+# Blazar serializes the `reservations` field as either a list of dicts or as
+# concatenated JSON objects in a single string — handle both. For
+# resource_type=flavor:instance reservations we return flavor_id (the dynamic
+# Blazar-created flavor), which is what nova accepts as `flavor_id`.
+_extract_reservation_flavor_ids() {
+    local lease_name="$1"
+    openstack reservation lease show "$lease_name" -f json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+raw = d.get("reservations")
+if isinstance(raw, list):
+    res = [json.loads(r) if isinstance(r, str) else r for r in raw]
+elif isinstance(raw, str):
+    s = raw.strip()
+    res = []
+    dec = json.JSONDecoder()
+    while s:
+        obj, idx = dec.raw_decode(s)
+        res.append(obj)
+        s = s[idx:].lstrip()
+else:
+    res = []
+for r in res:
+    print(r.get("flavor_id") or r["id"])
+'
+}
+
 stage_lease() {
-    log_section "Stage: lease — Reuse or create Chameleon VM reservation"
+    log_section "Stage: lease — Reuse GPU lease, create CPU lease at KVM@TACC"
     load_state
 
-    # Authenticate via clouds.yaml (works locally and on Chameleon Jupyter)
+    # Authenticate via clouds.yaml (KVM@TACC application credential)
     export OS_CLIENT_CONFIG_FILE="$TF_DIR/clouds.yaml"
     export OS_CLOUD="openstack"
 
-    # Check if lease already exists (any name) and is ACTIVE
-    local lease_status
-    lease_status=$(openstack reservation lease show "$LEASE_NAME" -f value -c status 2>/dev/null || echo "NOT_FOUND")
+    # ── 1. GPU lease (read-only; created by the professor) ────────────────────
+    local gpu_lease_status
+    gpu_lease_status=$(openstack reservation lease show "$GPU_LEASE_NAME" \
+        -f value -c status 2>/dev/null || echo "NOT_FOUND")
+    if [[ "$gpu_lease_status" == "NOT_FOUND" ]]; then
+        echo "ERROR: GPU lease '$GPU_LEASE_NAME' not found at KVM@TACC."
+        echo "  This lease is normally created by the course staff."
+        echo "  Override the name with GPU_LEASE_NAME=... if it's named differently."
+        exit 1
+    fi
+    log "GPU lease '$GPU_LEASE_NAME' status: $gpu_lease_status."
 
-    if [[ "$lease_status" == "ACTIVE" ]]; then
-        log "Lease '$LEASE_NAME' already ACTIVE. Reusing."
+    local gpu_flavor_id
+    gpu_flavor_id=$(_extract_reservation_flavor_ids "$GPU_LEASE_NAME" | head -1)
+    if [[ -z "$gpu_flavor_id" ]]; then
+        echo "ERROR: could not extract GPU flavor_id from lease '$GPU_LEASE_NAME'."
+        exit 1
+    fi
+    save_state "GPU_FLAVOR_ID" "$gpu_flavor_id"
+    log "GPU flavor_id: $gpu_flavor_id"
+
+    # Match the CPU lease end date to the GPU lease so the cluster doesn't
+    # half-die when one lease expires.
+    local gpu_end_date
+    gpu_end_date=$(openstack reservation lease show "$GPU_LEASE_NAME" \
+        -f value -c end_date | tr 'T' ' ' | cut -c1-16)
+
+    # ── 2. CPU lease (created here if missing) ────────────────────────────────
+    local cpu_lease_status
+    cpu_lease_status=$(openstack reservation lease show "$LEASE_NAME" \
+        -f value -c status 2>/dev/null || echo "NOT_FOUND")
+
+    if [[ "$cpu_lease_status" == "ACTIVE" || "$cpu_lease_status" == "PENDING" ]]; then
+        log "CPU lease '$LEASE_NAME' status: $cpu_lease_status. Reusing."
     else
-        # Delete stale lease (TERMINATED, ERROR, etc.) before creating a new one
-        if [[ "$lease_status" != "NOT_FOUND" ]]; then
-            log "Lease '$LEASE_NAME' is $lease_status. Deleting stale lease..."
+        if [[ "$cpu_lease_status" != "NOT_FOUND" ]]; then
+            log "CPU lease '$LEASE_NAME' is $cpu_lease_status. Deleting stale lease..."
             openstack reservation lease delete "$LEASE_NAME" 2>/dev/null || true
             sleep 5
         fi
 
-        log "Creating lease '$LEASE_NAME' for $LEASE_DURATION_HOURS hours..."
-        local FLAVOR_UUID
-        FLAVOR_UUID=$(openstack flavor show m1.large -f value -c id)
-
-        local start_date end_date
+        local start_date
         if date -v+30S &>/dev/null; then
-            # macOS date
             start_date=$(date -u -v+30S '+%Y-%m-%d %H:%M')
-            end_date=$(date -u -v+${LEASE_DURATION_HOURS}H '+%Y-%m-%d %H:%M')
         else
-            # GNU date
             start_date=$(date -u -d '+30 seconds' '+%Y-%m-%d %H:%M')
-            end_date=$(date -u -d "+${LEASE_DURATION_HOURS} hours" '+%Y-%m-%d %H:%M')
         fi
 
+        local cpu_flavor_uuid
+        cpu_flavor_uuid=$(openstack flavor show "$CPU_FLAVOR" -f value -c id)
+        if [[ -z "$cpu_flavor_uuid" ]]; then
+            echo "ERROR: flavor '$CPU_FLAVOR' not found at KVM@TACC."
+            exit 1
+        fi
+
+        log "Creating CPU lease '$LEASE_NAME' (3× $CPU_FLAVOR, ends $gpu_end_date)..."
         openstack reservation lease create "$LEASE_NAME" \
             --start-date "$start_date" \
-            --end-date "$end_date" \
-            --reservation "resource_type=flavor:instance,flavor_id=${FLAVOR_UUID},amount=3" \
+            --end-date "$gpu_end_date" \
+            --reservation "resource_type=flavor:instance,flavor_id=${cpu_flavor_uuid},amount=3" \
             2>&1 | tail -5
 
-        log "Waiting for lease to become ACTIVE..."
+        log "Waiting for CPU lease to become ACTIVE/PENDING..."
         for i in $(seq 1 12); do
-            lease_status=$(openstack reservation lease show "$LEASE_NAME" -f value -c status 2>/dev/null || echo "PENDING")
-            if [[ "$lease_status" == "ACTIVE" ]]; then
-                log "Lease is ACTIVE."
+            cpu_lease_status=$(openstack reservation lease show "$LEASE_NAME" \
+                -f value -c status 2>/dev/null || echo "PENDING")
+            if [[ "$cpu_lease_status" == "ACTIVE" || "$cpu_lease_status" == "PENDING" ]]; then
+                log "CPU lease status: $cpu_lease_status."
                 break
             fi
-            log "  Status: $lease_status ($i/12)..."
+            log "  Status: $cpu_lease_status ($i/12)..."
             sleep 10
         done
+        if [[ "$cpu_lease_status" != "ACTIVE" && "$cpu_lease_status" != "PENDING" ]]; then
+            echo "ERROR: CPU lease did not reach ACTIVE/PENDING in 2 minutes."
+            echo "  Capacity for $CPU_FLAVOR may be exhausted at KVM@TACC."
+            exit 1
+        fi
     fi
 
-    # Extract reservation flavor ID
-    local RESERVATION_FLAVOR_ID
-    RESERVATION_FLAVOR_ID=$(openstack reservation lease show "$LEASE_NAME" -f json -c reservations \
-        | python3 -c 'import sys, json; raw = json.load(sys.stdin)["reservations"]; r = json.loads(raw) if isinstance(raw, str) else raw[0]; r = json.loads(r) if isinstance(r, str) else r; print(r["flavor_id"])')
+    # ── 3. Extract CPU lease flavor_id and persist ────────────────────────────
+    local cpu_flavor_id
+    cpu_flavor_id=$(_extract_reservation_flavor_ids "$LEASE_NAME" | head -1)
+    if [[ -z "$cpu_flavor_id" ]]; then
+        echo "ERROR: could not extract CPU flavor_id from lease '$LEASE_NAME'."
+        exit 1
+    fi
+    save_state "CPU_FLAVOR_ID" "$cpu_flavor_id"
 
-    save_state "RESERVATION_FLAVOR_ID" "$RESERVATION_FLAVOR_ID"
-    export TF_VAR_reservation="$RESERVATION_FLAVOR_ID"
-    log "Reservation flavor ID: $RESERVATION_FLAVOR_ID"
+    log "Reservation flavor ids:"
+    log "  node1, node2, node3 → $cpu_flavor_id"
+    log "  gpu-node            → $gpu_flavor_id"
+}
+
+# Write ansible/inventory.yml + kubespray hosts.yaml from terraform output IPs.
+# Called from stage_terraform after apply.
+write_inventories() {
+    cd "$TF_DIR"
+    local node_ips_json
+    node_ips_json=$(terraform output -json node_ips 2>/dev/null || echo '{}')
+
+    local node1_ip node2_ip node3_ip gpu_ip
+    node1_ip=$(echo "$node_ips_json" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("node1",""))')
+    node2_ip=$(echo "$node_ips_json" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("node2",""))')
+    node3_ip=$(echo "$node_ips_json" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("node3",""))')
+    gpu_ip=$(echo "$node_ips_json" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("gpu-node",""))')
+
+    if [[ -z "$node1_ip" || -z "$node2_ip" || -z "$node3_ip" || -z "$gpu_ip" ]]; then
+        echo "ERROR: terraform output node_ips is missing one or more nodes."
+        return 1
+    fi
+
+    save_state "NODE1_IP" "$node1_ip"
+    save_state "NODE2_IP" "$node2_ip"
+    save_state "NODE3_IP" "$node3_ip"
+    save_state "GPU_NODE_IP" "$gpu_ip"
+
+    cat > "$ANSIBLE_DIR/inventory.yml" <<EOF
+all:
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  hosts:
+    node1:
+      ansible_host: $node1_ip
+      ansible_user: cc
+    node2:
+      ansible_host: $node2_ip
+      ansible_user: cc
+    node3:
+      ansible_host: $node3_ip
+      ansible_user: cc
+    gpu-node:
+      ansible_host: $gpu_ip
+      ansible_user: cc
+  children:
+    gpu_nodes:
+      hosts:
+        gpu-node:
+EOF
+
+    cat > "$ANSIBLE_DIR/k8s/inventory/mycluster/hosts.yaml" <<EOF
+all:
+  hosts:
+    node1:
+      ansible_host: $node1_ip
+      ansible_user: cc
+      ip: $node1_ip
+      access_ip: $node1_ip
+    node2:
+      ansible_host: $node2_ip
+      ansible_user: cc
+      ip: $node2_ip
+      access_ip: $node2_ip
+    node3:
+      ansible_host: $node3_ip
+      ansible_user: cc
+      ip: $node3_ip
+      access_ip: $node3_ip
+    gpu-node:
+      ansible_host: $gpu_ip
+      ansible_user: cc
+      ip: $gpu_ip
+      access_ip: $gpu_ip
+      nvidia_accelerator_enabled: true
+  children:
+    kube_control_plane:
+      hosts:
+        node1:
+        node2:
+    kube_node:
+      hosts:
+        node1:
+        node2:
+        node3:
+        gpu-node:
+    etcd:
+      hosts:
+        node1:
+        node2:
+        node3:
+    gpu_nodes:
+      hosts:
+        gpu-node:
+    k8s_cluster:
+      children:
+        kube_control_plane:
+        kube_node:
+    calico_rr:
+      hosts: {}
+EOF
+
+    log "Inventories written:"
+    log "  node1     $node1_ip"
+    log "  node2     $node2_ip"
+    log "  node3     $node3_ip"
+    log "  gpu-node  $gpu_ip"
 }
 
 # ─── Stage: terraform ─────────────────────────────────────────────────────────
 stage_terraform() {
-    log_section "Stage: terraform — Provision 3 VMs + floating IP"
+    log_section "Stage: terraform — Provision 3 CPU + 1 GPU VM at KVM@TACC"
     load_state
 
-    # If FLOATING_IP is already set and SSH works, skip everything
+    # If FLOATING_IP is already set and SSH works, just refresh inventories and skip.
     if [[ -n "${FLOATING_IP:-}" ]]; then
         if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
             -i "$SSH_KEY_PATH" "cc@${FLOATING_IP}" "echo ok" &>/dev/null; then
-            log "VMs already reachable at $FLOATING_IP. Skipping terraform."
+            log "Nodes already reachable at $FLOATING_IP. Refreshing inventories and skipping apply."
+            write_inventories
             ensure_floating_ip
             return 0
         fi
@@ -296,7 +480,7 @@ EOF
         log "Reusing existing clouds.yaml."
     else
         echo "ERROR: No clouds.yaml found and CHAMELEON_CREDENTIAL_ID/SECRET not set."
-        echo "Either set them in deploy.env, or create clouds.yaml manually from the template."
+        echo "Either set them in deploy.env, or create $TF_DIR/clouds.yaml manually from the template."
         exit 1
     fi
 
@@ -305,34 +489,47 @@ EOF
     # Clear OS_* so terraform uses clouds.yaml
     unset $(set | grep -o "^OS_[A-Za-z0-9_]*") 2>/dev/null || true
 
-    export TF_VAR_suffix
-    export TF_VAR_key="$SSH_KEY_NAME"
-    export TF_VAR_reservation="${RESERVATION_FLAVOR_ID:-}"
-
-    if [[ -z "$TF_VAR_reservation" ]]; then
-        echo "ERROR: RESERVATION_FLAVOR_ID not set. Run the 'lease' stage first."
+    if [[ -z "${CPU_FLAVOR_ID:-}" || -z "${GPU_FLAVOR_ID:-}" ]]; then
+        echo "ERROR: CPU_FLAVOR_ID / GPU_FLAVOR_ID not in state. Run the 'lease' stage first."
         exit 1
     fi
 
+    export TF_VAR_suffix
+    export TF_VAR_key="$SSH_KEY_NAME"
+    export TF_VAR_node_reservations
+    TF_VAR_node_reservations=$(python3 -c "
+import json, os
+cpu = os.environ['CPU_FLAVOR_ID']
+gpu = os.environ['GPU_FLAVOR_ID']
+print(json.dumps({
+    'node1':    cpu,
+    'node2':    cpu,
+    'node3':    cpu,
+    'gpu-node': gpu,
+}))
+")
+
     terraform init -input=false 2>&1 | tail -3
 
-    # Check if already applied — reuse existing VMs
+    # Check if already applied — reuse existing nodes
     local tf_ip
     tf_ip=$(terraform output -raw floating_ip_out 2>/dev/null || echo "")
     if [[ "$tf_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         FLOATING_IP="$tf_ip"
-        log "Terraform already applied. Reusing existing VMs."
+        log "Terraform already applied. Reusing existing nodes."
     else
         log "Running terraform apply..."
         terraform apply -auto-approve 2>&1 | tee "$LOG_DIR/terraform.log" | tail -10
         FLOATING_IP=$(terraform output -raw floating_ip_out)
     fi
 
-    log "Floating IP: $FLOATING_IP"
+    log "Floating IP (node1): $FLOATING_IP"
     save_state "FLOATING_IP" "$FLOATING_IP"
+    write_inventories
     ensure_floating_ip
 
-    # Wait for SSH to come up
+    # Wait for SSH to come up on the floating IP. Other nodes are on the
+    # private subnet and are reached via ansible's ProxyCommand through node1.
     log "Waiting for SSH on $FLOATING_IP..."
     for i in $(seq 1 30); do
         if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
@@ -692,9 +889,10 @@ stage_verify() {
 
 # ─── Stage: destroy ───────────────────────────────────────────────────────────
 stage_destroy() {
-    log_section "Stage: destroy — Tear down VMs + delete lease"
+    log_section "Stage: destroy — Tear down nodes + delete CPU lease"
 
-    echo "This will DESTROY all VMs and delete the Chameleon lease."
+    echo "This will DESTROY the 4 VMs and delete the CPU lease ($LEASE_NAME)."
+    echo "The GPU lease ($GPU_LEASE_NAME) is owned by course staff and will NOT be touched."
     echo "Press Ctrl+C within 10 seconds to cancel."
     sleep 10
 
@@ -706,11 +904,12 @@ stage_destroy() {
     load_state
     export TF_VAR_suffix
     export TF_VAR_key="$SSH_KEY_NAME"
-    export TF_VAR_reservation="${RESERVATION_FLAVOR_ID:-dummy}"
+    # Pass placeholder reservation map so terraform destroy can still parse vars.
+    export TF_VAR_node_reservations='{"node1":"x","node2":"x","node3":"x","gpu-node":"x"}'
 
     terraform destroy -auto-approve 2>&1 | tail -10
 
-    # Delete lease
+    # Delete only the CPU lease we created. The GPU lease is the professor's.
     export OS_CLIENT_CONFIG_FILE="$TF_DIR/clouds.yaml"
     export OS_CLOUD="openstack"
     openstack reservation lease delete "$LEASE_NAME" 2>/dev/null || true
@@ -718,7 +917,7 @@ stage_destroy() {
     # Clean state
     rm -f "$STATE_FILE"
 
-    log "Everything destroyed."
+    log "Everything destroyed (GPU lease '$GPU_LEASE_NAME' preserved)."
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

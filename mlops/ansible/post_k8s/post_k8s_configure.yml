@@ -32,7 +32,7 @@
         msg: "{{ kubectl_output.stdout_lines }}"
 
 - name: Add User to Docker Group
-  hosts: node1,node2,node3
+  hosts: all
   become: yes
   tasks:
 
@@ -41,7 +41,7 @@
         name: cc
         groups: docker
         append: yes
-        
+
     - meta: reset_connection
 
     - name: Verify Docker group membership for user 'cc'
@@ -52,16 +52,18 @@
       debug:
         msg: "{{ cc_id.stdout }}"
 
-- name: Disable IPv6 on Internet-facing interface
+- name: Disable IPv6 on the primary network interface
   hosts: all
   become: true
   tasks:
 
-    - name: Create sysctl config to disable IPv6
+    - name: Create sysctl config to disable IPv6 on the default route interface
       copy:
         dest: /etc/sysctl.d/99-disable-ipv6.conf
+        # ansible_default_ipv4.interface picks the right NIC on each host,
+        # whether it's ens3 (KVM), eno1 (bare-metal), enp..., etc.
         content: |
-          net.ipv6.conf.ens3.disable_ipv6 = 1
+          net.ipv6.conf.{{ ansible_default_ipv4.interface }}.disable_ipv6 = 1
         owner: root
         group: root
         mode: '0644'
@@ -70,11 +72,16 @@
       command: sysctl --system
 
 - name: Avoid using private interface for DNS
-  hosts: node1,node2,node3
+  hosts: all
   become: yes
   tasks:
-    - name: Set DNS for interface ens4
+    - name: Set DNS for ens4 (the private-net NIC) to loopback
+      # KVM nodes have two NICs (ens3=sharednet1, ens4=private-net). Without
+      # this, systemd-resolved sometimes picks ens4 and DNS leaks/dies.
+      # `failed_when: false` so single-NIC images don't break the play.
       command: resolvectl dns ens4 127.0.0.1
+      failed_when: false
+      changed_when: false
 
 - name: Patch CoreDNS to use external resolver and restart it
   hosts: node1
@@ -301,6 +308,75 @@
         kubectl apply -n argo-events -f https://github.com/argoproj/argo-events/releases/download/v1.9.6/install.yaml
       args:
         executable: /bin/bash
+
+- name: Label GPU node and install NVIDIA device plugin
+  hosts: node1
+  become: yes
+  tasks:
+    - name: Label gpu-node with accelerator=nvidia
+      command: kubectl label node gpu-node accelerator=nvidia --overwrite
+
+    - name: Apply NVIDIA k8s-device-plugin DaemonSet (scheduled only on labeled GPU nodes)
+      shell: |
+        cat <<'YAML' | kubectl apply -f -
+        apiVersion: apps/v1
+        kind: DaemonSet
+        metadata:
+          name: nvidia-device-plugin-daemonset
+          namespace: kube-system
+        spec:
+          selector:
+            matchLabels:
+              name: nvidia-device-plugin-ds
+          updateStrategy:
+            type: RollingUpdate
+          template:
+            metadata:
+              labels:
+                name: nvidia-device-plugin-ds
+            spec:
+              nodeSelector:
+                accelerator: nvidia
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+              priorityClassName: system-node-critical
+              containers:
+                - image: nvcr.io/nvidia/k8s-device-plugin:v0.15.0
+                  name: nvidia-device-plugin-ctr
+                  env:
+                    - name: FAIL_ON_INIT_ERROR
+                      value: "false"
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop: ["ALL"]
+                  volumeMounts:
+                    - name: device-plugin
+                      mountPath: /var/lib/kubelet/device-plugins
+              volumes:
+                - name: device-plugin
+                  hostPath:
+                    path: /var/lib/kubelet/device-plugins
+        YAML
+      args:
+        executable: /bin/bash
+
+    - name: Wait for the GPU to register on gpu-node
+      command: kubectl get node gpu-node -o jsonpath={.status.allocatable.nvidia\.com/gpu}
+      register: gpu_register
+      retries: 30
+      delay: 5
+      until: gpu_register.stdout != "" and gpu_register.stdout != "0"
+      changed_when: false
+      failed_when: false
+
+    - name: Show GPU registration status (warn but don't fail if missing)
+      debug:
+        msg: >-
+          {{ 'GPU registered: ' ~ gpu_register.stdout if (gpu_register.stdout|default('')) not in ['', '0']
+             else 'WARNING: GPU not registered on gpu-node — check nvidia-smi and the device-plugin pod logs.' }}
 
 - name: Copy ArgoCD admin secret to Argo Workflows namespace
   hosts: node1

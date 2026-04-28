@@ -1,30 +1,43 @@
 ---
-- name: Disable and Mask firewalld
+# Pre-K8s host prep for the KVM@TACC cluster (3× CPU + 1× GPU VM).
+# Each VM gets a 200GB cinder volume from terraform; the block-volume detection
+# block below mounts it at /mnt/data. The detection stays defensive — if no
+# extra device is found, /mnt/data is just a local directory on the root disk.
+
+- name: Disable firewalld if present
   hosts: all
   become: yes
-
   tasks:
-    - name: Stop firewalld service
+    - name: Stop and mask firewalld (ignored if not installed)
       systemd:
         name: firewalld
         state: stopped
         enabled: no
-
-    - name: Mask firewalld service
-      systemd:
-        name: firewalld
         masked: yes
+      failed_when: false
 
-- name: Format and mount block storage volume
-  hosts: node1,node2,node3
+- name: Ensure /mnt/data exists on every node (for containerd / local-path PVC)
+  hosts: all
   become: yes
-
   tasks:
-    - name: Find the unpartitioned block device (the 200GB attached volume)
+    - name: Create /mnt/data and subdirectories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /mnt/data
+        - /mnt/data/docker
+        - /mnt/data/local-path-provisioner
+
+- name: Format and mount block storage volume (only when one is attached)
+  hosts: all
+  become: yes
+  tasks:
+    - name: Find an unpartitioned block device (cinder volume, if any)
       shell: |
         for dev in /dev/vda /dev/vdb /dev/vdc; do
           [ -b "$dev" ] || continue
-          # Skip if device has partitions (it's the root disk)
           if ! lsblk -n -o TYPE "$dev" | grep -q part; then
             echo "$dev"
             exit 0
@@ -53,13 +66,6 @@
         fi
       when: data_device.stdout != ""
 
-    - name: Create /mnt/data mount point
-      file:
-        path: /mnt/data
-        state: directory
-        mode: '0755'
-      when: data_device.stdout != ""
-
     - name: Mount data device to /mnt/data
       mount:
         path: /mnt/data
@@ -77,7 +83,7 @@
         fi
       when: data_device.stdout != ""
 
-    - name: Create subdirectories on block volume
+    - name: Recreate subdirectories on (possibly remounted) /mnt/data
       file:
         path: "/mnt/data/{{ item }}"
         state: directory
@@ -88,7 +94,7 @@
       when: data_device.stdout != ""
 
 - name: Set up insecure registry and Docker data-root on block volume
-  hosts: node1,node2,node3
+  hosts: all
   become: yes
 
   vars:
@@ -138,3 +144,51 @@
         state: restarted
         daemon_reload: yes
 
+- name: Configure NVIDIA container runtime on the GPU node
+  hosts: gpu_nodes
+  become: yes
+
+  tasks:
+    - name: Verify nvidia-smi is available (CC-Ubuntu24.04-CUDA ships drivers)
+      command: nvidia-smi
+      register: nvidia_smi
+      changed_when: false
+      failed_when: false
+
+    - name: Warn if nvidia-smi is missing (driver install would be needed)
+      debug:
+        msg: "WARNING: nvidia-smi failed on this node. Image may not be CC-Ubuntu24.04-CUDA — GPU workloads will fail."
+      when: nvidia_smi.rc != 0
+
+    - name: Install nvidia-container-toolkit (idempotent if already present)
+      apt:
+        name: nvidia-container-toolkit
+        state: present
+        update_cache: yes
+      failed_when: false
+
+    - name: Configure Docker daemon.json with nvidia runtime
+      copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "insecure-registries": ["registry.kube-system.svc.cluster.local:5000"],
+            "default-runtime": "nvidia",
+            "runtimes": {
+              "nvidia": {
+                "path": "nvidia-container-runtime",
+                "runtimeArgs": []
+              }
+            }
+          }
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart docker on gpu
+
+  handlers:
+    - name: restart docker on gpu
+      systemd:
+        name: docker
+        state: restarted
+        daemon_reload: yes

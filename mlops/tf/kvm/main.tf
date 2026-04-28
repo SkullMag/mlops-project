@@ -43,8 +43,8 @@ resource "openstack_compute_instance_v2" "nodes" {
   for_each = var.nodes
 
   name       = "${each.key}-mlops-${var.suffix}"
-  image_name = "CC-Ubuntu24.04"
-  flavor_id  = var.reservation
+  image_name = each.key == "gpu-node" ? "CC-Ubuntu24.04-CUDA" : "CC-Ubuntu24.04"
+  flavor_id  = var.node_reservations[each.key]
   key_pair   = var.key
 
   network {
