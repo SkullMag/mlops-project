@@ -1,0 +1,12 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: finetune-model-
+  namespace: argo
+spec:
+  workflowTemplateRef:
+    name: train-model
+  arguments:
+    parameters:
+    - name: train-config
+      value: configs/finetune.yaml
