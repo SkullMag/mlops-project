@@ -86,6 +86,12 @@ spec:
       - name: git-commit
         valueFrom:
           path: /var/run/argo/outputs/parameters/git-commit
+    # training-data PVC is bound to gpu-node (local-path); pod must run there
+    tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: present
+      effect: NoSchedule
     retryStrategy:
       limit: "5"
       retryPolicy: "Always"
@@ -161,6 +167,11 @@ spec:
     inputs:
       parameters:
       - name: git-commit
+    tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: present
+      effect: NoSchedule
     retryStrategy:
       limit: "3"
       retryPolicy: "Always"
