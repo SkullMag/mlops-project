@@ -27,6 +27,12 @@ spec:
     hostPath:
       path: /mnt/data/buildkit-cache
       type: DirectoryOrCreate
+  # PyTorch DataLoader workers use /dev/shm to share tensors between processes.
+  # K8s default shm is 64Mi which is too small; mount a tmpfs sized for batches.
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 2Gi
 
   templates:
   - name: training-and-build
@@ -226,16 +232,21 @@ spec:
             # Avoid hard failure if training didn't emit a version.
             : > /var/run/argo/outputs/parameters/modelversion
           fi
+      nodeSelector:
+        accelerator: nvidia
       resources:
         requests:
-          memory: "4Gi"
+          memory: "8Gi"
           cpu: "500m"
         limits:
-          memory: "6Gi"
+          memory: "16Gi"
           cpu: "4"
+          nvidia.com/gpu: "1"
       volumeMounts:
       - name: workdir
         mountPath: /mnt/workspace
+      - name: dshm
+        mountPath: /dev/shm
       env:
         - name: MLFLOW_TRACKING_URI
           value: "http://mlflow.immich-platform.svc.cluster.local:8000"

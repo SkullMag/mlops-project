@@ -93,6 +93,17 @@
         - local-path-provisioner
       when: data_device.stdout != ""
 
+    # buildkit-rootless mounts this hostPath as its state dir and runs as uid 1000.
+    # Without pre-creation it gets auto-made root:root, causing "permission denied"
+    # on buildkitd.lock. Create it here so workflow pods can write immediately.
+    - name: Ensure /mnt/data/buildkit-cache is owned by uid 1000 (buildkit-rootless)
+      file:
+        path: /mnt/data/buildkit-cache
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: '0755'
+
 - name: Set up insecure registry and Docker data-root on block volume
   hosts: all
   become: yes
