@@ -226,6 +226,13 @@ spec:
       - name: modelversion
         valueFrom:
           path: /var/run/argo/outputs/parameters/modelversion
+    nodeSelector:
+      accelerator: nvidia
+    tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: present
+      effect: NoSchedule
     container:
       image: registry.kube-system.svc.cluster.local:5000/immich-tagger-train:latest
       command: [sh, -c]
@@ -243,13 +250,6 @@ spec:
             # Avoid hard failure if training didn't emit a version.
             : > /var/run/argo/outputs/parameters/modelversion
           fi
-      nodeSelector:
-        accelerator: nvidia
-      tolerations:
-      - key: nvidia.com/gpu
-        operator: Equal
-        value: present
-        effect: NoSchedule
       resources:
         requests:
           memory: "8Gi"
