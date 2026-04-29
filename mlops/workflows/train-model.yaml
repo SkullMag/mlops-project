@@ -234,6 +234,11 @@ spec:
           fi
       nodeSelector:
         accelerator: nvidia
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Equal
+        value: present
+        effect: NoSchedule
       resources:
         requests:
           memory: "8Gi"

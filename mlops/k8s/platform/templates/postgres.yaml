@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: postgres:18
+          image: mirror.gcr.io/library/postgres:18
           env:
             - name: POSTGRES_USER
               valueFrom:

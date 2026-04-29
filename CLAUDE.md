@@ -68,7 +68,7 @@ Example: `immich.immich.persistence.library.existingClaim` (not `immich.persiste
 - **Training workflow branch**: `workflow_build_training_init.yml` defaults to `branch: main` (was `mlops`, which doesn't exist).
 - **Two Blazar leases**: `stage_lease` reads the GPU `flavor_id` from the staff-owned `production_proj12` lease (do NOT delete it — it belongs to the professor). Only the `lease_mlops_cpu_proj12` lease is created/destroyed by the script.
 - **GPU registration**: `post-k8s` applies a vanilla `nvidia-device-plugin` DaemonSet pinned to nodes labeled `accelerator=nvidia`. If `kubectl get node gpu-node -o jsonpath={.status.allocatable.nvidia\.com/gpu}` is empty, check `nvidia-smi` on the node and the device-plugin pod logs in `kube-system`.
-- **GPU node not tainted**: `gpu-node` accepts any pod (no NoSchedule taint). GPU workloads use `nodeSelector: accelerator=nvidia` to land there.
+- **GPU node taint**: `gpu-node` carries `nvidia.com/gpu=present:NoSchedule`. GPU workloads must add `nodeSelector: accelerator=nvidia` plus a matching toleration (see `mlops/workflows/train-model.yaml`).
 - **Why H100 on KVM, not bare-metal CHI**: Original plan was CHI@UC bare-metal, but CPU bare-metal hosts at CHI@UC were too scarce (only 1 reservable for the lease window). Pivoted to KVM@TACC where the prof granted a `g1.h100.pci.1` (full H100 passthrough) GPU lease and CPU capacity is plentiful.
 
 ## GitHub
