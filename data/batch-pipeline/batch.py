@@ -13,8 +13,8 @@ BUCKET_NAME = os.environ.get("BUCKET_NAME", "proj12-data")
 
 TEST_USERS = {"user_001", "user_002", "user_003", "user_004", "user_005"}
 
-IMMICH_API_KEY = "3gPv2G1Tt2wRzm7uMNKeISlURlxCqN3NF8gqsMUzy6E"
-IMMICH_BASE_URL = "http://129.114.24.200:2283"
+IMMICH_API_KEY = "aDJFdcgC4Novkz8MlCCaNxqvMGRchHVFM8WhON1k"
+IMMICH_BASE_URL = "http://129.114.25.84:2283"
 
 def get_minio_client():
     return boto3.client(
